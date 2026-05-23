@@ -487,7 +487,13 @@ def mk_btn(text, cls, parent=None):
 def open_pdf(path):
     if not path or not os.path.isfile(path):
         QMessageBox.warning(None,"Report Not Found",f"Could not find:\n{path}"); return
-    subprocess.Popen(["open",path])
+    
+    if sys.platform == "win32":
+        os.startfile(path)
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", path])
+    else:
+        subprocess.Popen(["xdg-open", path])
 
 # ── Home Widget ───────────────────────────────────────────────────────────────
 class HomeWidget(QWidget):
