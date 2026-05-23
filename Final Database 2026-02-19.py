@@ -22,10 +22,10 @@ from PySide6.QtWidgets import (
     QSizePolicy, QStackedWidget, QFormLayout, QLayout, QSplitter,
     QTabWidget, QMenu
 )
-from PySide6.QtCore import Qt, QSize, QThread, Signal, QTimer, QRect, QPoint
+from PySide6.QtCore import Qt, QSize, QThread, Signal, QTimer, QRect, QPoint, QMutex, QWaitCondition, QPointF
 from PySide6.QtGui import (
     QPixmap, QColor, QFont,
-    QPainter, QPainterPath, QBrush, QPen
+    QPainter, QPainterPath, QBrush, QPen, QImage
 )
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -118,6 +118,10 @@ def generate_css():
     QTabBar::tab {{ background: {c['SURFACE2']}; color: {c['TEXT2']}; padding: 8px 16px; border-top-left-radius: 6px; border-top-right-radius: 6px; margin-right: 2px; }}
     QTabBar::tab:selected {{ background: {c['ACCENT']}; color: #ffffff; font-weight: bold; }}
 
+    QMenu {{ background-color: {c['SURFACE']}; color: {c['TEXT']}; border: 1px solid {c['BORDER']}; padding: 4px; }}
+    QMenu::item {{ padding: 6px 24px; border-radius: 4px; }}
+    QMenu::item:selected {{ background-color: {c['FAINT']}; }}
+
     QProgressBar {{ background:{c['SURFACE2']}; border:none; border-radius:4px; height:6px; }}
     QProgressBar::chunk {{ background:{c['ACCENT']}; border-radius:4px; }}
     QLabel {{ background:transparent; color:{c['TEXT']}; }}
@@ -157,27 +161,15 @@ def generate_css():
     QPushButton.report_btn:hover {{ background:#16a34a; color:#ffffff; }}
 
     QWidget#splash_widget {{ background:{c['BG']}; }}
+    
+    ShoeCard[state="normal"] {{ background: {c['CARD']}; border-radius: 10px; border: 2px solid transparent; }}
+    ShoeCard[state="normal"]:hover {{ background: {c['CARD_HOVER']}; border: 2px solid {c['FAINT']}; }}
+    ShoeCard[state="pinned"] {{ background: {c['CARD_HOVER']}; border-radius: 10px; border: 2px solid {c['AMBER']}; }}
+    ShoeCard[state="selected"] {{ background: {c['CARD_HOVER']}; border-radius: 10px; border: 2px solid {c['ACCENT']}; }}
+    
+    ShoeCard QLabel#card_brand {{ color: {c['DIM']}; font-size: 10px; }}
+    ShoeCard QLabel#card_name {{ color: {c['TEXT']}; font-weight: 600; font-size: 11px; }}
     """
-
-# ── ShoeCard custom paint — full border all sides ────────────────────────────
-CARD_CSS_UNSELECTED = """
-    ShoeCard {{
-        background: {CARD};
-        border-radius: 10px;
-        border: 2px solid transparent;
-    }}
-    ShoeCard:hover {{
-        background: {CARD_HOVER};
-        border: 2px solid {FAINT};
-    }}
-"""
-CARD_CSS_SELECTED = """
-    ShoeCard {{
-        background: {CARD_HOVER};
-        border-radius: 10px;
-        border: 2px solid {ACCENT};
-    }}
-"""
 
 # ── Splash Screen ─────────────────────────────────────────────────────────────
 class SplashScreen(QWidget):
@@ -227,6 +219,28 @@ class SplashScreen(QWidget):
 
 
 # ── Custom Widgets ───────────────────────────────────────────────────────────
+class MoreOptionsButton(QPushButton):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(32, 32)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        c = get_c()
+        color = QColor(c['TEXT'])
+        p.setBrush(color)
+        p.setPen(Qt.PenStyle.NoPen)
+        cx = self.width() / 2
+        cy = self.height() / 2
+        r = 2.0
+        p.drawEllipse(QPointF(cx, cy - 6), r, r)
+        p.drawEllipse(QPointF(cx, cy), r, r)
+        p.drawEllipse(QPointF(cx, cy + 6), r, r)
+        p.end()
+
 class ClickableLabel(QLabel):
     clicked = Signal(int)
     def __init__(self, idx, parent=None):
@@ -257,12 +271,7 @@ def get_all_shoes(q="", search_mode="all"):
     order="ORDER BY LENGTH(idapt_id) ASC, idapt_id ASC, brand ASC"
     if q:
         like=f"%{q}%"
-        if search_mode == "idapt":
-            rows=con.execute(f"SELECT * FROM shoes WHERE idapt_id LIKE ? {order}",(like,)).fetchall()
-        elif search_mode == "model":
-            rows=con.execute(f"SELECT * FROM shoes WHERE model LIKE ? {order}",(like,)).fetchall()
-        else:  # "all"
-            rows=con.execute(f"SELECT * FROM shoes WHERE brand LIKE ? OR model LIKE ? OR sole_type LIKE ? OR idapt_id LIKE ? {order}",(like,like,like,like)).fetchall()
+        rows=con.execute(f"SELECT * FROM shoes WHERE brand LIKE ? OR model LIKE ? OR sole_type LIKE ? OR idapt_id LIKE ? OR lab_data LIKE ? {order}",(like,like,like,like,like)).fetchall()
     else:
         rows=con.execute(f"SELECT * FROM shoes {order}").fetchall()
     con.close(); return [dict(r) for r in rows]
@@ -568,32 +577,26 @@ class ShoeCard(QFrame):
         nl.setContentsMargins(8,5,8,8); nl.setSpacing(2)
         idapt,brand,model=self.shoe.get("idapt_id",""),self.shoe.get("brand",""),self.shoe.get("model","")
         display=(f"{brand} {model}".strip() if brand and brand!=idapt else f"{idapt} {model}".strip()) or idapt or "?"
-        self.brand_lbl=QLabel(brand if brand and brand!=idapt else ""); self.brand_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.name_lbl=QLabel(display); self.name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter); self.name_lbl.setWordWrap(True)
+        self.brand_lbl=QLabel(brand if brand and brand!=idapt else "")
+        self.brand_lbl.setObjectName("card_brand")
+        self.brand_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.name_lbl=QLabel(display)
+        self.name_lbl.setObjectName("card_name")
+        self.name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.name_lbl.setWordWrap(True)
         nl.addWidget(self.brand_lbl); nl.addWidget(self.name_lbl); lay.addWidget(nw)
-        sc=self.shoe.get("maa_mean"); self._score_txt=f"{float(sc):.1f}°" if sc not in (None,"") else ""; self._refresh_colors()
+        sc=self.shoe.get("maa_mean"); self._score_txt=f"{float(sc):.1f}°" if sc not in (None,"") else ""
+        self.setProperty("state", "normal")
 
-    def _refresh_colors(self):
-        c=get_c()
-        self.brand_lbl.setStyleSheet(f"color:{c['DIM']};font-size:10px;")
-        self.name_lbl.setStyleSheet(f"color:{c['TEXT']};font-weight:600;font-size:11px;")
-        self._score_color=score_color(self.shoe.get("maa_mean")); self._apply_border_style(); self.update()
-
-    def _apply_border_style(self):
-        c=get_c()
-        if self._selected:
-            self.setStyleSheet(f"""
-                ShoeCard{{background:{c['CARD_HOVER']};border-radius:10px;border:2.5px solid {c['ACCENT']};}}
-            """)
-        elif self._pinned:
-            self.setStyleSheet(f"""
-                ShoeCard{{background:{c['CARD_HOVER']};border-radius:10px;border:2px solid {c['AMBER']};}}
-            """)
-        else:
-            self.setStyleSheet(f"""
-                ShoeCard{{background:{c['CARD']};border-radius:10px;border:2px solid transparent;}}
-                ShoeCard:hover{{background:{c['CARD_HOVER']};border:2px solid {c['FAINT']};}}
-            """)
+    def update_shoe(self, shoe):
+        self.shoe = shoe
+        idapt,brand,model=shoe.get("idapt_id",""),shoe.get("brand",""),shoe.get("model","")
+        display=(f"{brand} {model}".strip() if brand and brand!=idapt else f"{idapt} {model}".strip()) or idapt or "?"
+        self.brand_lbl.setText(brand if brand and brand!=idapt else "")
+        self.name_lbl.setText(display)
+        sc=shoe.get("maa_mean")
+        self._score_txt=f"{float(sc):.1f}°" if sc not in (None,"") else ""
+        self.update()
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -601,15 +604,30 @@ class ShoeCard(QFrame):
         p=QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing); p.setFont(QFont("Courier New",9,QFont.Weight.Bold))
         tw=p.fontMetrics().horizontalAdvance(self._score_txt)+14; rx,ry,th=self.width()-tw-5,5,18
         pill_bg=QColor(0,0,0,150) if CURRENT_MODE=="dark" else QColor(255,255,255,200)
-        p.setBrush(QBrush(pill_bg)); p.setPen(QPen(QColor(self._score_color),1.5))
+        
+        score_c = score_color(self.shoe.get("maa_mean"))
+        
+        p.setBrush(QBrush(pill_bg)); p.setPen(QPen(QColor(score_c),1.5))
         path=QPainterPath(); path.addRoundedRect(rx,ry,tw,th,9,9); p.drawPath(path)
-        p.setPen(QColor(self._score_color)); p.drawText(QRect(int(rx),int(ry),int(tw),int(th)),Qt.AlignmentFlag.AlignCenter,self._score_txt); p.end()
+        p.setPen(QColor(score_c)); p.drawText(QRect(int(rx),int(ry),int(tw),int(th)),Qt.AlignmentFlag.AlignCenter,self._score_txt); p.end()
 
     def set_selected(self, sel):
-        self._selected=sel; self._apply_border_style()
+        if self._selected == sel: return
+        self._selected=sel; self._update_state()
 
     def set_pinned(self, pinned):
-        self._pinned=pinned; self._apply_border_style()
+        if self._pinned == pinned: return
+        self._pinned=pinned; self._update_state()
+
+    def _update_state(self):
+        if self._selected:
+            self.setProperty("state", "selected")
+        elif self._pinned:
+            self.setProperty("state", "pinned")
+        else:
+            self.setProperty("state", "normal")
+        self.style().unpolish(self)
+        self.style().polish(self)
 
     def mousePressEvent(self, e):
         if e.button()==Qt.MouseButton.LeftButton: self.clicked.emit(self.shoe)
@@ -631,6 +649,61 @@ class SidebarEmpty(QWidget):
         self.lbls[1].setStyleSheet(f"color:{c['TEXT2']};font-weight:600;font-size:14px;")
         self.lbls[2].setStyleSheet(f"color:{c['DIM']};font-size:12px;")
 
+class DetailLoadWorker(QThread):
+    finished_load = Signal(dict, list, list, list)
+    
+    def __init__(self, shoe, parent=None):
+        super().__init__(parent)
+        self.shoe = shoe
+        self._is_stopped = False
+        
+    def stop(self):
+        self._is_stopped = True
+        
+    def run(self):
+        imgs = []
+        reports = []
+        shoe = self.shoe
+        try: imgs = [p for p in json.loads(shoe.get("all_images") or "[]") if os.path.isfile(p)]
+        except: pass
+        if not imgs and shoe.get("image_path") and os.path.isfile(shoe["image_path"]):
+            imgs = [shoe["image_path"]]
+            
+        try: reports = [p for p in json.loads(shoe.get("all_reports") or "[]") if os.path.isfile(p)]
+        except: pass
+        if not reports and shoe.get("report_path") and os.path.isfile(shoe["report_path"]):
+            reports = [shoe["report_path"]]
+            
+        if self._is_stopped: return
+        
+        qimages_data = []
+        if imgs:
+            path = imgs[0]
+            img = QImage(path)
+            if not img.isNull() and not self._is_stopped:
+                scaled = img.scaled(330, 206, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                canvas = QImage(330, 206, QImage.Format.Format_ARGB32_Premultiplied)
+                canvas.fill(QColor("#ffffff"))
+                p = QPainter(canvas)
+                p.drawImage((330 - scaled.width()) // 2, (206 - scaled.height()) // 2, scaled)
+                p.end()
+                qimages_data.append((path, 330, 206, canvas))
+            
+            for path in imgs[:8]:
+                if self._is_stopped: return
+                img = QImage(path)
+                if not img.isNull():
+                    scaled = img.scaled(42, 38, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                    canvas = QImage(42, 38, QImage.Format.Format_ARGB32_Premultiplied)
+                    canvas.fill(QColor("#ffffff"))
+                    p = QPainter(canvas)
+                    p.drawImage((42 - scaled.width()) // 2, (38 - scaled.height()) // 2, scaled)
+                    p.end()
+                    qimages_data.append((path, 42, 38, canvas))
+                    
+        if not self._is_stopped:
+            self.finished_load.emit(shoe, imgs, reports, qimages_data)
+
 class SidebarDetail(QWidget):
     edit_requested=Signal(dict); delete_requested=Signal(dict)
     def __init__(self):
@@ -638,24 +711,40 @@ class SidebarDetail(QWidget):
 
     def _build(self):
         root=QVBoxLayout(self); root.setContentsMargins(0,0,0,0); root.setSpacing(0)
+        self.stack = QStackedWidget(); root.addWidget(self.stack)
+        
+        self.loading_widget = QWidget()
+        ll = QVBoxLayout(self.loading_widget)
+        self.loading_lbl = QLabel("Loading details...")
+        self.loading_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ll.addWidget(self.loading_lbl)
+        self.stack.addWidget(self.loading_widget)
+        
+        self.content_widget = QWidget()
+        cl = QVBoxLayout(self.content_widget); cl.setContentsMargins(0,0,0,0); cl.setSpacing(0)
+        
         self.gallery=QFrame(); self.gallery.setFixedHeight(210); self.gallery.setObjectName("gallery")
         gl=QHBoxLayout(self.gallery); gl.setContentsMargins(4,0,4,0); gl.setSpacing(4)
         self.prev_btn=mk_btn("‹","action_btn"); self.prev_btn.setFixedSize(28,28); self.prev_btn.clicked.connect(self._prev)
         self.gal_img=QLabel(); self.gal_img.setAlignment(Qt.AlignmentFlag.AlignCenter); self.gal_img.setSizePolicy(QSizePolicy.Policy.Expanding,QSizePolicy.Policy.Expanding)
         self.next_btn=mk_btn("›","action_btn"); self.next_btn.setFixedSize(28,28); self.next_btn.clicked.connect(self._next)
-        gl.addWidget(self.prev_btn,0,Qt.AlignmentFlag.AlignVCenter); gl.addWidget(self.gal_img); gl.addWidget(self.next_btn,0,Qt.AlignmentFlag.AlignVCenter); root.addWidget(self.gallery)
-        self.counter=QLabel(); self.counter.setAlignment(Qt.AlignmentFlag.AlignCenter); root.addWidget(self.counter)
+        gl.addWidget(self.prev_btn,0,Qt.AlignmentFlag.AlignVCenter); gl.addWidget(self.gal_img); gl.addWidget(self.next_btn,0,Qt.AlignmentFlag.AlignVCenter); cl.addWidget(self.gallery)
+        self.counter=QLabel(); self.counter.setAlignment(Qt.AlignmentFlag.AlignCenter); cl.addWidget(self.counter)
         self.strip_scroll=QScrollArea(); self.strip_scroll.setFixedHeight(50)
         self.strip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.strip_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.strip_scroll.setObjectName("strip_scroll")
         sw=QWidget(); self.strip_layout=QHBoxLayout(sw); self.strip_layout.setContentsMargins(6,4,6,4); self.strip_layout.setSpacing(4); self.strip_layout.addStretch()
-        self.strip_scroll.setWidget(sw); self.strip_scroll.setWidgetResizable(True); root.addWidget(self.strip_scroll)
-        self.bar=QFrame(); self.bar.setFixedHeight(3); root.addWidget(self.bar)
+        self.strip_scroll.setWidget(sw); self.strip_scroll.setWidgetResizable(True); cl.addWidget(self.strip_scroll)
+        self.bar=QFrame(); self.bar.setFixedHeight(3); cl.addWidget(self.bar)
         self.scroll=QScrollArea(); self.scroll.setWidgetResizable(True)
         self.inner=QWidget(); self.inner.setObjectName("sidebar_inner")
         self.inner_l=QVBoxLayout(self.inner); self.inner_l.setContentsMargins(0,0,0,16); self.inner_l.setSpacing(0)
-        self.scroll.setWidget(self.inner); root.addWidget(self.scroll)
+        self.scroll.setWidget(self.inner); cl.addWidget(self.scroll)
+        
+        self.stack.addWidget(self.content_widget)
+        self.stack.setCurrentIndex(1)
+        self._worker = None
 
     def refresh_theme(self):
         c=get_c()
@@ -663,18 +752,38 @@ class SidebarDetail(QWidget):
         self.bar.setStyleSheet(f"background:{c['ACCENT']};border:none;")
         self.gallery.setStyleSheet(f"QFrame#gallery{{background-color:{c['SIDEBAR']};}}")
         self.strip_scroll.setStyleSheet(f"QScrollArea{{background:{c['SIDEBAR']};border:none;}}QWidget{{background:{c['SIDEBAR']};}}")
+        if hasattr(self, 'loading_lbl'): self.loading_lbl.setStyleSheet(f"color:{c['DIM']};font-size:14px;")
         if self._shoe: self._refresh_detail()
 
     def load(self, shoe):
-        self._shoe=shoe; self._imgs=[]; self._reports=[]
-        if shoe:
-            try: self._imgs=[p for p in json.loads(shoe.get("all_images") or "[]") if os.path.isfile(p)]
-            except: pass
-            if not self._imgs and shoe.get("image_path") and os.path.isfile(shoe["image_path"]): self._imgs=[shoe["image_path"]]
-            try: self._reports=[p for p in json.loads(shoe.get("all_reports") or "[]") if os.path.isfile(p)]
-            except: pass
-            if not self._reports and shoe.get("report_path") and os.path.isfile(shoe["report_path"]): self._reports=[shoe["report_path"]]
-        self._idx=0; self._refresh_gallery(); self._refresh_strip(); self._refresh_detail()
+        if self._worker and self._worker.isRunning():
+            try:
+                self._worker.finished_load.disconnect()
+            except:
+                pass
+            self._worker.stop()
+            self._worker = None
+            
+        self._shoe=shoe; self._imgs=[]; self._reports=[]; self._idx=0
+        if not shoe:
+            self._refresh_gallery(); self._refresh_strip(); self._refresh_detail(); self.stack.setCurrentIndex(1)
+            return
+            
+        self.stack.setCurrentIndex(0)
+        brand = shoe.get("brand", "")
+        model = shoe.get("model", "")
+        self.loading_lbl.setText(f"Loading {brand} {model}...")
+        
+        self._worker = DetailLoadWorker(shoe)
+        self._worker.finished_load.connect(self._on_load_finished)
+        self._worker.start()
+
+    def _on_load_finished(self, shoe, imgs, reports, qimages_data):
+        if self._shoe != shoe: return
+        for path, w, h, qimg in qimages_data:
+            _PIXMAP_CACHE[(path, w, h)] = QPixmap.fromImage(qimg)
+        self._imgs = imgs; self._reports = reports; self._idx = 0
+        self._refresh_gallery(); self._refresh_strip(); self._refresh_detail(); self.stack.setCurrentIndex(1)
 
     def _refresh_gallery(self):
         if self._imgs:
@@ -723,6 +832,7 @@ class SidebarDetail(QWidget):
         def mk(text,color,size=13,bold=False,wrap=False):
             l=QLabel(text); l.setStyleSheet(f"color:{color};font-size:{size}px;font-weight:{'700' if bold else '400'};background:transparent;")
             if wrap: l.setWordWrap(True)
+            l.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             return l
         def divider():
             f=QFrame(); f.setFixedHeight(1); f.setStyleSheet(f"background:{c['FAINT']};border:none;margin:0 14px;"); self.inner_l.addWidget(f)
@@ -736,13 +846,16 @@ class SidebarDetail(QWidget):
             w=QWidget(); l=QHBoxLayout(w); l.setContentsMargins(14,2,14,2)
             lb=QLabel(label+":"); lb.setFixedWidth(130); lb.setStyleSheet(f"color:{c['DIM']};font-size:12px;")
             vl=QLabel(str(value)); vl.setStyleSheet(f"color:{c['TEXT']};font-size:12px;font-weight:600;"); vl.setWordWrap(True)
+            vl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             l.addWidget(lb); l.addWidget(vl,1); self.inner_l.addWidget(w)
 
         nw=QWidget(); nl=QVBoxLayout(nw); nl.setContentsMargins(14,14,14,4); nl.setSpacing(2)
         idapt,brand,model=shoe.get("idapt_id",""),shoe.get("brand",""),shoe.get("model","")
         display=(f"{brand} {model}".strip() if brand and brand!=idapt else f"{idapt} {model}".strip()) or "Untitled"
         name_lbl=QLabel(display); name_lbl.setWordWrap(True); name_lbl.setStyleSheet(f"color:{c['TEXT']};font-weight:700;font-size:15px;")
+        name_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         brand_lbl=QLabel(brand if brand and brand!=idapt else ""); brand_lbl.setStyleSheet(f"color:{c['TEXT2']};font-size:12px;")
+        brand_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         nl.addWidget(name_lbl); nl.addWidget(brand_lbl); self.inner_l.addWidget(nw)
 
         sc=shoe.get("maa_mean")
@@ -750,6 +863,7 @@ class SidebarDetail(QWidget):
             sd=shoe.get("maa_sd"); sc_txt=f"{float(sc):.1f}°"; sd_txt=f"σ = {float(sd):.2f}°" if sd not in (None,"") else ""
             mw=QWidget(); ml=QHBoxLayout(mw); ml.setContentsMargins(14,10,14,4)
             val_lbl=QLabel(sc_txt); val_lbl.setStyleSheet(f"color:{score_color(sc)};font-size:28px;font-weight:700;font-family:'Courier New';")
+            val_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             meta=QWidget(); mm=QVBoxLayout(meta); mm.setContentsMargins(12,0,0,4); mm.setSpacing(2)
             mm.addWidget(mk("MAA Mean",c['TEXT2'],11,bold=True))
             if sd_txt: mm.addWidget(mk(sd_txt,c['DIM'],10))
@@ -773,17 +887,18 @@ class SidebarDetail(QWidget):
             nw2=QWidget(); nl2=QVBoxLayout(nw2); nl2.setContentsMargins(14,0,14,8)
             note=QLabel(shoe["notes"]); note.setWordWrap(True)
             note.setStyleSheet(f"color:{c['TEXT2']};font-size:12px;background:{c['SURFACE2']};padding:8px;border-radius:6px;")
+            note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             nl2.addWidget(note); self.inner_l.addWidget(nw2)
 
         self.inner_l.addStretch(); divider()
         bw=QWidget(); bl=QHBoxLayout(bw); bl.setContentsMargins(14,8,14,0); bl.setSpacing(8)
-        edit_btn=mk_btn("✏  Edit","action_btn"); edit_btn.clicked.connect(lambda: self.edit_requested.emit(self._shoe))
-        del_btn=mk_btn("🗑  Delete","danger_btn"); del_btn.clicked.connect(lambda: self.delete_requested.emit(self._shoe))
+        edit_btn=mk_btn("Edit","action_btn"); edit_btn.clicked.connect(lambda: self.edit_requested.emit(self._shoe))
+        del_btn=mk_btn("Delete","danger_btn"); del_btn.clicked.connect(lambda: self.delete_requested.emit(self._shoe))
         bl.addWidget(edit_btn,1); bl.addWidget(del_btn,1); self.inner_l.addWidget(bw)
 
         if self._reports:
             rw=QWidget(); rl=QHBoxLayout(rw); rl.setContentsMargins(14,4,14,8)
-            label=f"📄  Open Report" if len(self._reports)==1 else f"📄  Open Report ({len(self._reports)})"
+            label=f"Open Report" if len(self._reports)==1 else f"Open Report ({len(self._reports)})"
             report_btn=mk_btn(label,"report_btn"); report_btn.clicked.connect(self._open_report)
             rl.addWidget(report_btn,1); self.inner_l.addWidget(rw)
 
@@ -967,10 +1082,10 @@ class CompareColumn(QFrame):
         # ── bottom button bar ──
         btn_w = QWidget(); btn_l = QHBoxLayout(btn_w)
         btn_l.setContentsMargins(8,6,8,8); btn_l.setSpacing(6)
-        self.report_btn = QPushButton("📄 Report")
+        self.report_btn = QPushButton("Report")
         self.report_btn.setFixedHeight(26)
         self.report_btn.clicked.connect(lambda: self.open_report_requested.emit(self.shoe))
-        self.unpin_btn = QPushButton("✕ Unpin")
+        self.unpin_btn = QPushButton("Unpin")
         self.unpin_btn.setFixedHeight(26)
         self.unpin_btn.clicked.connect(lambda: self.unpin_requested.emit(self.shoe))
         btn_l.addWidget(self.report_btn, 1); btn_l.addWidget(self.unpin_btn, 1)
@@ -1015,6 +1130,7 @@ class CompareColumn(QFrame):
         def lbl(text, color, size=12, bold=False, wrap=True):
             l = QLabel(text); l.setWordWrap(wrap)
             l.setStyleSheet(f"color:{color};font-size:{size}px;font-weight:{'700' if bold else '400'};background:transparent;")
+            l.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             return l
         def divider():
             f = QFrame(); f.setFixedHeight(1); f.setStyleSheet(f"background:{c['FAINT']};border:none;")
@@ -1030,6 +1146,7 @@ class CompareColumn(QFrame):
             lb = QLabel(label+":"); lb.setFixedWidth(100); lb.setWordWrap(True)
             lb.setStyleSheet(f"color:{c['DIM']};font-size:11px;")
             vl = QLabel(str(value)); vl.setStyleSheet(f"color:{c['TEXT']};font-size:11px;font-weight:600;"); vl.setWordWrap(True)
+            vl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             l.addWidget(lb); l.addWidget(vl,1); self.detail_lay.addWidget(w)
 
         # ── Name / brand ──
@@ -1046,6 +1163,7 @@ class CompareColumn(QFrame):
             maa_lbl = QLabel(f"{float(sc):.1f}°")
             maa_lbl.setStyleSheet(f"color:{score_color(sc)};font-size:24px;font-weight:700;font-family:'Courier New';background:transparent;")
             maa_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            maa_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             sub_txt = "MAA Mean"
             if sd not in (None,""):
                 try: sub_txt += f"  ·  σ={float(sd):.2f}°"
@@ -1188,6 +1306,59 @@ class ComparePanel(QWidget):
     def count(self): return len(self._columns)
 
 
+class AsyncImageLoader(QThread):
+    loaded = Signal(int, QImage, str, int, int)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.queue = []
+        self.mutex = QMutex()
+        self.cond = QWaitCondition()
+        self.running = True
+
+    def run(self):
+        while self.running:
+            self.mutex.lock()
+            if not self.queue:
+                self.cond.wait(self.mutex)
+            if not self.queue:
+                self.mutex.unlock()
+                continue
+            idx, path, w, h = self.queue.pop(0)
+            self.mutex.unlock()
+
+            img = QImage(path)
+            if not img.isNull():
+                scaled = img.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                canvas = QImage(w, h, QImage.Format.Format_ARGB32_Premultiplied)
+                canvas.fill(QColor("#ffffff"))
+                p = QPainter(canvas)
+                x = (w - scaled.width()) // 2
+                y = (h - scaled.height()) // 2
+                p.drawImage(x, y, scaled)
+                p.end()
+                self.loaded.emit(idx, canvas, path, w, h)
+            else:
+                self.loaded.emit(idx, QImage(), path, w, h)
+
+    def queue_image(self, idx, path, w, h):
+        self.mutex.lock()
+        self.queue.append((idx, path, w, h))
+        self.cond.wakeOne()
+        self.mutex.unlock()
+
+    def clear(self):
+        self.mutex.lock()
+        self.queue.clear()
+        self.mutex.unlock()
+
+    def stop(self):
+        self.running = False
+        self.mutex.lock()
+        self.cond.wakeAll()
+        self.mutex.unlock()
+        self.wait()
+
 # ── Main Window ───────────────────────────────────────────────────────────────
 class ShoeDatabase(QMainWindow):
     def __init__(self):
@@ -1196,12 +1367,15 @@ class ShoeDatabase(QMainWindow):
         self.resize(1200,760); self.setMinimumSize(900,600); self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._cards=[]; self._all_shoes=[]; self._selected_shoe=None
         self._compare=None
-        self._search_mode = "all"
-        self._mode_btns = {}
-        self._img_load_timer=QTimer(); self._img_load_timer.timeout.connect(self._load_image_batch)
-        self._img_load_index=0
+        self._img_loader = AsyncImageLoader()
+        self._img_loader.loaded.connect(self._on_image_loaded)
+        self._img_loader.start()
         self._search_timer=QTimer(); self._search_timer.setSingleShot(True); self._search_timer.timeout.connect(self._do_refresh)
         init_db(); self._build_ui(); self.apply_theme(); self._do_refresh()
+
+    def closeEvent(self, event):
+        self._img_loader.stop()
+        super().closeEvent(event)
 
     def _build_ui(self):
         c=get_c()
@@ -1222,28 +1396,20 @@ class ShoeDatabase(QMainWindow):
             self.top_logo.setPixmap(pix); tl.addWidget(self.top_logo)
         title_lbl=QLabel("Shoe Database"); title_lbl.setObjectName("topbar_title"); tl.addWidget(title_lbl); tl.addStretch()
 
-        # ── Search mode toggle ──────────────────────────────────────
-        mode_bar = QWidget(); mode_bar.setStyleSheet("background:transparent;")
-        mode_lay = QHBoxLayout(mode_bar); mode_lay.setContentsMargins(0,0,0,0); mode_lay.setSpacing(2)
-        for label, key in [("All", "all"), ("iDAPT #", "idapt"), ("Model #", "model")]:
-            b = QPushButton(label)
-            b.setCheckable(True)
-            b.setChecked(key == "all")
-            b.setFixedHeight(28)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.clicked.connect(lambda checked, k=key: self._set_search_mode(k))
-            self._mode_btns[key] = b
-            mode_lay.addWidget(b)
-        tl.addWidget(mode_bar)
+        self.search_box=QLineEdit(); self.search_box.setPlaceholderText("Search brand, model, iDAPT…"); self.search_box.setFixedWidth(200)
+        self.search_box.textChanged.connect(lambda: self._search_timer.start(150)); tl.addWidget(self.search_box)
 
-        self.search_box=QLineEdit(); self.search_box.setPlaceholderText("Search…"); self.search_box.setFixedWidth(200)
-        self.search_box.textChanged.connect(lambda: self._search_timer.start(400)); tl.addWidget(self.search_box)
+        add_btn=mk_btn("+ Add Shoe","primary_btn"); add_btn.setToolTip("Add New Shoe"); add_btn.clicked.connect(self._add_shoe); tl.addWidget(add_btn)
 
-        self.theme_btn=mk_btn("☀️","icon_btn"); self.theme_btn.setToolTip("Toggle Theme"); self.theme_btn.clicked.connect(self._toggle_theme); tl.addWidget(self.theme_btn)
-        export_btn=mk_btn("📤","icon_btn"); export_btn.setToolTip("Export to CSV"); export_btn.clicked.connect(self._export_excel); tl.addWidget(export_btn)
-        sync_btn=mk_btn("🔄","icon_btn"); sync_btn.setToolTip("Sync from Excel + Photos folder"); sync_btn.clicked.connect(self._run_sync); tl.addWidget(sync_btn)
-        imp_btn=mk_btn("📂","icon_btn"); imp_btn.setToolTip("Import iDAPT Folders manually"); imp_btn.clicked.connect(self._import_folder); tl.addWidget(imp_btn)
-        add_btn=mk_btn("➕","primary_icon_btn"); add_btn.setToolTip("Add New Shoe"); add_btn.clicked.connect(self._add_shoe); tl.addWidget(add_btn)
+        self.more_btn=MoreOptionsButton(self); self.more_btn.setProperty("class", "action_btn"); self.more_btn.setToolTip("More Options")
+        self.more_menu=QMenu(self)
+        self.more_menu.addAction("Toggle Theme", self._toggle_theme)
+        self.more_menu.addAction("Export to CSV", self._export_excel)
+        self.more_menu.addAction("Sync Data", self._run_sync)
+        self.more_menu.addAction("Import Folders", self._import_folder)
+        self.more_btn.clicked.connect(lambda: self.more_menu.exec(self.more_btn.mapToGlobal(QPoint(0, self.more_btn.height() + 2))))
+        tl.addWidget(self.more_btn)
+
         db_lay.addWidget(self.topbar)
 
         self.splitter=QSplitter(Qt.Orientation.Horizontal); db_lay.addWidget(self.splitter,1)
@@ -1265,36 +1431,6 @@ class ShoeDatabase(QMainWindow):
         self.app_stack.addWidget(self.db_page)
 
     def _enter_app(self): self.app_stack.setCurrentIndex(1); self.setFocus()
-
-    def _set_search_mode(self, mode):
-        self._search_mode = mode
-        for k, b in self._mode_btns.items():
-            b.setChecked(k == mode)
-        self._apply_mode_btn_styles()
-        placeholders = {
-            "all":   "Search brand, model, iDAPT…",
-            "idapt": "e.g. IDAPT042",
-            "model": "e.g. Arctic Grip Pro",
-        }
-        self.search_box.setPlaceholderText(placeholders.get(mode, "Search…"))
-        self._search_timer.start(100)
-
-    def _apply_mode_btn_styles(self):
-        c = get_c()
-        for key, b in self._mode_btns.items():
-            if b.isChecked():
-                b.setStyleSheet(
-                    f"QPushButton{{background:{c['ACCENT']};color:#ffffff;"
-                    f"border-radius:6px;padding:2px 10px;font-size:11px;"
-                    f"font-weight:700;border:none;}}"
-                )
-            else:
-                b.setStyleSheet(
-                    f"QPushButton{{background:{c['SURFACE2']};color:{c['TEXT2']};"
-                    f"border-radius:6px;padding:2px 10px;font-size:11px;"
-                    f"font-weight:500;border:none;}}"
-                    f"QPushButton:hover{{background:{c['FAINT']};}}"
-                )
 
     def _toggle_pin(self, shoe):
         if self._compare.is_pinned(shoe):
@@ -1336,12 +1472,10 @@ class ShoeDatabase(QMainWindow):
 
     def _toggle_theme(self):
         global CURRENT_MODE; CURRENT_MODE="light" if CURRENT_MODE=="dark" else "dark"
-        self.theme_btn.setText("☀️" if CURRENT_MODE=="light" else "🌙"); self.apply_theme()
+        self.apply_theme()
 
     def apply_theme(self):
         self.setStyleSheet(generate_css()); self._sb_empty.refresh_theme(); self._sb_detail.refresh_theme()
-        for card in self._cards: card._refresh_colors()
-        if self._mode_btns: self._apply_mode_btn_styles()
         if self._compare: self._compare.refresh_theme()
 
     def _run_sync(self):
@@ -1387,39 +1521,88 @@ class ShoeDatabase(QMainWindow):
 
     def _do_refresh(self):
         q=self.search_box.text().strip()
-        self._all_shoes=get_all_shoes(q, self._search_mode)
+        self._all_shoes=get_all_shoes(q, "all")
         self._rebuild_grid()
 
     def _rebuild_grid(self):
-        self._img_load_timer.stop(); self._img_load_index=0
+        self._img_loader.clear()
         c=get_c()
+        self.grid_widget.hide()
+        
         while self.flow.count():
-            child=self.flow.takeAt(0)
-            if child and child.widget(): child.widget().deleteLater()
+            item = self.flow.takeAt(0)
+            w = item.widget()
+            if w:
+                w.hide()
+                if not isinstance(w, ShoeCard):
+                    w.deleteLater()
+                    
         self._cards.clear()
+        if not hasattr(self, '_card_pool'): self._card_pool = []
+        
         if not self._all_shoes:
             emp=QLabel("No shoes found.\nClick '+ Add Shoe' to get started.")
             emp.setAlignment(Qt.AlignmentFlag.AlignCenter); emp.setStyleSheet(f"color:{c['DIM']};font-size:14px;")
-            self.flow.addWidget(emp); return
+            self.flow.addWidget(emp)
+            emp.show()
+            self.grid_widget.show()
+            return
+            
         sel_id=self._selected_shoe["id"] if self._selected_shoe else None
-        for shoe in self._all_shoes:
-            card=ShoeCard(shoe); card.set_selected(shoe["id"]==sel_id); card.set_pinned(self._compare.is_pinned(shoe) if self._compare else False); card.clicked.connect(self._on_card_click); card.pin_requested.connect(self._toggle_pin)
-            self.flow.addWidget(card); self._cards.append(card)
-        self._img_load_index=0; self._img_load_timer.start(0)
+        
+        for i, shoe in enumerate(self._all_shoes):
+            if i < len(self._card_pool):
+                card = self._card_pool[i]
+                card.update_shoe(shoe)
+            else:
+                card=ShoeCard(shoe)
+                card.clicked.connect(self._on_card_click)
+                card.pin_requested.connect(self._toggle_pin)
+                self._card_pool.append(card)
+                
+            card.set_selected(shoe["id"]==sel_id)
+            card.set_pinned(self._compare.is_pinned(shoe) if self._compare else False)
+            self.flow.addWidget(card)
+            self._cards.append(card)
+            card.show()
+            
+            card.img_lbl.setPixmap(_placeholder(CARD_W, THUMB_H))
+            
+            path = card.shoe.get("image_path", "")
+            if path:
+                key = (path, CARD_W, THUMB_H)
+                if key in _PIXMAP_CACHE:
+                    card.img_lbl.setPixmap(_PIXMAP_CACHE[key])
+                else:
+                    self._img_loader.queue_image(i, path, CARD_W, THUMB_H)
+        self.grid_widget.show()
 
-    def _load_image_batch(self):
-        BATCH=8
-        end=min(self._img_load_index+BATCH,len(self._cards))
-        for i in range(self._img_load_index,end):
-            card=self._cards[i]
-            px=load_pixmap(card.shoe.get("image_path",""),CARD_W,THUMB_H)
-            card.img_lbl.setPixmap(px)
-        self._img_load_index=end
-        if self._img_load_index>=len(self._cards): self._img_load_timer.stop()
+    def _on_image_loaded(self, idx, qimg, path, w, h):
+        if idx >= len(self._cards): return
+        card = self._cards[idx]
+        if card.shoe.get("image_path") != path: return
+        
+        if not qimg.isNull():
+            px = QPixmap.fromImage(qimg)
+        else:
+            px = _placeholder(w, h)
+            
+        _PIXMAP_CACHE[(path, w, h)] = px
+        card.img_lbl.setPixmap(px)
 
     def _on_card_click(self,shoe):
+        if self._selected_shoe and self._selected_shoe["id"] == shoe["id"]:
+            return
+            
+        prev_id = self._selected_shoe["id"] if self._selected_shoe else None
         self._selected_shoe=shoe
-        for card in self._cards: card.set_selected(card.shoe["id"]==shoe["id"])
+        
+        for card in self._cards:
+            if card.shoe["id"] == shoe["id"]:
+                card.set_selected(True)
+            elif prev_id and card.shoe["id"] == prev_id:
+                card.set_selected(False)
+                
         self._sb_detail.load(shoe)
         if self._compare.count() == 0:
             self.sidebar_stack.setCurrentIndex(1)
