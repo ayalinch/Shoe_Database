@@ -42,8 +42,6 @@ THUMB_H  = 130
 CARD_W   = THUMB_W + 20
 CARD_H   = THUMB_H + 50
 
-os.makedirs(IMG_DIR, exist_ok=True)
-
 # ── Global pixmap cache ──────────────────────────────────────────────────────
 _PIXMAP_CACHE = {}
 
