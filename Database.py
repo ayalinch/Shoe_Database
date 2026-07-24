@@ -29,10 +29,16 @@ from PySide6.QtGui import (
 )
 
 # ── Config ──────────────────────────────────────────────────────────────────
-BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+    BUNDLE_DIR = sys._MEIPASS
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    BUNDLE_DIR = BASE_DIR
+
 DB_PATH      = os.path.join(BASE_DIR, "shoes.db")
 IMG_DIR      = os.path.join(BASE_DIR, "images")
-LOGO_PATH    = os.path.join(BASE_DIR, "68556ca78f14ebbed4120b97_Blue-KITE.png")
+LOGO_PATH    = os.path.join(BUNDLE_DIR, "68556ca78f14ebbed4120b97_Blue-KITE.png")
 EXCEL_PATH   = os.path.join(BASE_DIR, "WinterLab Master list of footwear.xlsx")
 REPORTS_DIR  = os.path.join(BASE_DIR, "Photos and Reports")
 IMG_EXTS     = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff"}
