@@ -36,11 +36,31 @@ else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     BUNDLE_DIR = BASE_DIR
 
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+
+def load_config():
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_config(config_data):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, indent=4)
+    except Exception as e:
+        print(f"Error saving config: {e}")
+
+_config = load_config()
+
 DB_PATH      = os.path.join(BASE_DIR, "shoes.db")
 IMG_DIR      = os.path.join(BASE_DIR, "images")
 LOGO_PATH    = os.path.join(BUNDLE_DIR, "68556ca78f14ebbed4120b97_Blue-KITE.png")
 EXCEL_PATH   = os.path.join(BASE_DIR, "WinterLab Master list of footwear.xlsx")
-REPORTS_DIR  = os.path.join(BASE_DIR, "Photos and Reports")
+REPORTS_DIR  = _config.get("reports_dir", "")
 IMG_EXTS     = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff"}
 
 THUMB_W  = 160
@@ -86,7 +106,7 @@ THEMES = {
     }
 }
 
-CURRENT_MODE = "light"
+CURRENT_MODE = _config.get("theme", "light")
 
 def get_c():
     return THEMES[CURRENT_MODE]
@@ -348,7 +368,7 @@ class SyncWorker(QThread):
         else:
             self.progress.emit("⚠️ Excel not found — skipping")
 
-        # 2. Scan Photos and Reports
+        # 2. Scan Images and Reports
         folder_data={}
         if os.path.exists(REPORTS_DIR):
             for entry in os.listdir(REPORTS_DIR):
@@ -363,7 +383,7 @@ class SyncWorker(QThread):
                 folder_data[idapt_id]={"imgs":imgs,"pdfs":pdfs,"best":best}
             self.progress.emit(f"📁 Found {len(folder_data)} iDAPT folders")
         else:
-            self.progress.emit("⚠️ Photos and Reports folder not found — skipping")
+            self.progress.emit("⚠️ Image/Report folder not found — skipping")
 
         # 3. Merge
         existing={r[0]:r[1] for r in con.execute("SELECT idapt_id,id FROM shoes WHERE idapt_id IS NOT NULL")}
@@ -482,9 +502,9 @@ def load_pixmap(path, w, h):
 
 def _placeholder(w,h):
     c=get_c()
-    px=QPixmap(w,h); px.fill(QColor("#ffffff"))
+    px=QPixmap(w,h); px.fill(QColor(c['CARD']))
     p=QPainter(px); p.setRenderHint(QPainter.RenderHint.Antialiasing); p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QColor("#f0f0f0")); p.drawRoundedRect(6,6,w-12,h-12,8,8)
+    p.setBrush(QColor(c['SURFACE2'])); p.drawRoundedRect(6,6,w-12,h-12,8,8)
     p.setFont(QFont("Arial",24)); p.setPen(QColor(c['DIM'])); p.drawText(QRect(0,0,w,h),Qt.AlignmentFlag.AlignCenter,"👟"); p.end()
     return px
 
@@ -600,6 +620,11 @@ class ShoeCard(QFrame):
         self.name_lbl.setText(display)
         sc=shoe.get("maa_mean")
         self._score_txt=f"{float(sc):.1f}°" if sc not in (None,"") else ""
+        
+        path = shoe.get("image_path")
+        if not path or not os.path.isfile(path):
+            self.img_lbl.setPixmap(_placeholder(CARD_W, THUMB_H))
+            
         self.update()
 
     def paintEvent(self, event):
@@ -758,6 +783,7 @@ class SidebarDetail(QWidget):
         self.strip_scroll.setStyleSheet(f"QScrollArea{{background:{c['SIDEBAR']};border:none;}}QWidget{{background:{c['SIDEBAR']};}}")
         if hasattr(self, 'loading_lbl'): self.loading_lbl.setStyleSheet(f"color:{c['DIM']};font-size:14px;")
         if self._shoe: self._refresh_detail()
+        self._refresh_gallery()
 
     def load(self, shoe):
         if self._worker and self._worker.isRunning():
@@ -1213,6 +1239,19 @@ class CompareColumn(QFrame):
         self.next_btn.setStyleSheet(f"QPushButton{{background:{c['SURFACE2']};color:{c['TEXT']};border-radius:4px;border:none;font-size:14px;font-weight:bold;}}QPushButton:hover{{background:{c['FAINT']};}}")
         self.unpin_btn.setStyleSheet(f"QPushButton{{background:{c['SURFACE2']};color:{c['TEXT2']};border-radius:6px;border:none;font-size:11px;padding:2px 6px;}}QPushButton:hover{{background:{c['RED']};color:#ffffff;}}")
         self.report_btn.setStyleSheet(f"QPushButton{{background:#f0fdf4;color:#16a34a;border-radius:6px;border:1px solid #16a34a;font-size:11px;padding:2px 6px;}}QPushButton:hover{{background:#16a34a;color:#ffffff;}}")
+        
+        if hasattr(self, 'img_lbl'):
+            if self._imgs:
+                path = self._imgs[self._img_idx]
+                if not path or not os.path.isfile(path):
+                    self.img_lbl.setPixmap(_placeholder(self.COL_W, self.IMG_H))
+                else:
+                    px = load_pixmap(path, self.COL_W, self.IMG_H)
+                    self.img_lbl.setPixmap(px.scaled(self.COL_W, self.IMG_H,
+                        Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            else:
+                self.img_lbl.setPixmap(_placeholder(self.COL_W, self.IMG_H))
+                
         self._fill_detail()
 
 
@@ -1409,6 +1448,7 @@ class ShoeDatabase(QMainWindow):
         self.more_menu=QMenu(self)
         self.more_menu.addAction("Toggle Theme", self._toggle_theme)
         self.more_menu.addAction("Export to CSV", self._export_excel)
+        self.more_menu.addAction("Change Image/Report Directory", self._change_reports_dir)
         self.more_menu.addAction("Sync Data", self._run_sync)
         self.more_menu.addAction("Import Folders", self._import_folder)
         self.more_btn.clicked.connect(lambda: self.more_menu.exec(self.more_btn.mapToGlobal(QPoint(0, self.more_btn.height() + 2))))
@@ -1476,11 +1516,24 @@ class ShoeDatabase(QMainWindow):
 
     def _toggle_theme(self):
         global CURRENT_MODE; CURRENT_MODE="light" if CURRENT_MODE=="dark" else "dark"
+        _config["theme"] = CURRENT_MODE
+        save_config(_config)
         self.apply_theme()
 
     def apply_theme(self):
         self.setStyleSheet(generate_css()); self._sb_empty.refresh_theme(); self._sb_detail.refresh_theme()
         if self._compare: self._compare.refresh_theme()
+        
+        keys_to_delete = [k for k in _PIXMAP_CACHE.keys() if not k[0] or not os.path.isfile(k[0])]
+        for k in keys_to_delete:
+            del _PIXMAP_CACHE[k]
+
+        if hasattr(self, '_cards'):
+            for card in self._cards:
+                path = card.shoe.get("image_path")
+                if not path or not os.path.isfile(path):
+                    card.img_lbl.setPixmap(_placeholder(CARD_W, THUMB_H))
+                card.update()
 
     def _run_sync(self):
         dlg=SyncDialog(self); dlg.exec()
@@ -1628,7 +1681,7 @@ class ShoeDatabase(QMainWindow):
             delete_shoe(shoe["id"]); self._compare.unpin(shoe); self._selected_shoe=None; self._sb_detail.load(None); self._refresh_card_pin_states(); self._update_sidebar_mode(); self._do_refresh()
 
     def _import_folder(self):
-        root=QFileDialog.getExistingDirectory(self,"Select 'Photos and Reports' folder")
+        root=QFileDialog.getExistingDirectory(self,"Select Image/Report Directory")
         if not root: return
         entries=[e for e in os.listdir(root) if os.path.isdir(os.path.join(root,e)) and re.match(r"iDAPT\d+",e,re.IGNORECASE)]
         if not entries: QMessageBox.information(self,"Import","No iDAPT folders found."); return
@@ -1637,11 +1690,31 @@ class ShoeDatabase(QMainWindow):
         dlg=ImportDialog(self,root); dlg.exec(); imp,skip=dlg.result_counts(); self._do_refresh()
         QMessageBox.information(self,"Import Complete",f"Imported: {imp} shoes\n⏭ Skipped (already exist): {skip}")
 
+    def _change_reports_dir(self):
+        global REPORTS_DIR
+        new_dir = QFileDialog.getExistingDirectory(self, "Select Image/Report Directory", REPORTS_DIR)
+        if new_dir:
+            REPORTS_DIR = new_dir
+            _config["reports_dir"] = new_dir
+            save_config(_config)
+            QMessageBox.information(self, "Directory Changed", f"Image/Report directory updated to:\n{new_dir}\n\nPlease run 'Sync Data' to update existing absolute paths in the database.")
+
 
 # ── Entry Point ───────────────────────────────────────────────────────────────
 if __name__=="__main__":
     app=QApplication(sys.argv)
     app.setStyle("Fusion")
+    
+    if not REPORTS_DIR or not os.path.exists(REPORTS_DIR):
+        QMessageBox.information(None, "Initial Setup", "Please select the folder containing your photos and reports.")
+        selected_dir = QFileDialog.getExistingDirectory(None, "Select Image/Report Directory")
+        if not selected_dir:
+            QMessageBox.critical(None, "Error", "A valid photos and reports directory is required. Exiting.")
+            sys.exit(1)
+        REPORTS_DIR = selected_dir
+        _config["reports_dir"] = REPORTS_DIR
+        save_config(_config)
+
     splash=SplashScreen(); splash.show(); app.processEvents()
 
     def _launch():
