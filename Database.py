@@ -8,6 +8,7 @@ Run:  python3 fin.py
 
 import sys
 import os
+os.environ["QT_LOGGING_RULES"] = "qt.gui.imageio*=false"
 import re
 import json
 import sqlite3
@@ -20,7 +21,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QLabel, QPushButton, QLineEdit, QFrame,
     QFileDialog, QMessageBox, QDialog, QTextEdit, QProgressBar,
     QSizePolicy, QStackedWidget, QFormLayout, QLayout, QSplitter,
-    QTabWidget, QMenu
+    QTabWidget, QMenu, QCheckBox
 )
 from PySide6.QtCore import Qt, QSize, QThread, Signal, QTimer, QRect, QPoint, QMutex, QWaitCondition, QPointF
 from PySide6.QtGui import (
@@ -583,10 +584,11 @@ class FlowLayout(QLayout):
 class ShoeCard(QFrame):
     clicked = Signal(dict)
     pin_requested = Signal(dict)
+    multi_select_toggled = Signal(dict, bool)
 
     def __init__(self, shoe, parent=None):
         super().__init__(parent); self.shoe=shoe; self._selected=False
-        self.setFixedSize(CARD_W,CARD_H); self.setCursor(Qt.CursorShape.PointingHandCursor); self._pinned=False; self._build()
+        self.setFixedSize(CARD_W,CARD_H); self.setCursor(Qt.CursorShape.PointingHandCursor); self._pinned=False; self._multi_select_mode=False; self._build()
 
     def _build(self):
         lay=QVBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(0)
@@ -597,6 +599,14 @@ class ShoeCard(QFrame):
         self.img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter); self.img_lbl.setStyleSheet("background:transparent;")
         self.img_lbl.setPixmap(_placeholder(CARD_W,THUMB_H))
         ic_lay.addWidget(self.img_lbl); lay.addWidget(img_container)
+        
+        self.multi_check = QCheckBox(self)
+        self.multi_check.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.multi_check.setGeometry(8, 8, 20, 20)
+        self.multi_check.setStyleSheet("QCheckBox::indicator { width: 18px; height: 18px; }")
+        self.multi_check.hide()
+        self.multi_check.clicked.connect(self._on_check_clicked)
+        
         nw=QWidget(); nw.setStyleSheet("background:transparent;"); nl=QVBoxLayout(nw)
         nl.setContentsMargins(8,5,8,8); nl.setSpacing(2)
         idapt,brand,model=self.shoe.get("idapt_id",""),self.shoe.get("brand",""),self.shoe.get("model","")
@@ -658,7 +668,34 @@ class ShoeCard(QFrame):
         self.style().unpolish(self)
         self.style().polish(self)
 
+    def _on_check_clicked(self, checked):
+        self.multi_select_toggled.emit(self.shoe, checked)
+
+    def set_multi_select_mode(self, active, is_checked=False):
+        self._multi_select_mode = active
+        self.multi_check.blockSignals(True)
+        self.multi_check.setChecked(is_checked)
+        self.multi_check.blockSignals(False)
+        if active or is_checked:
+            self.multi_check.show()
+        else:
+            self.multi_check.hide()
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        if not self._multi_select_mode:
+            self.multi_check.show()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        if not self._multi_select_mode and not self.multi_check.isChecked():
+            self.multi_check.hide()
+
     def mousePressEvent(self, e):
+        if self._multi_select_mode and e.button() == Qt.MouseButton.LeftButton:
+            self.multi_check.setChecked(not self.multi_check.isChecked())
+            self._on_check_clicked(self.multi_check.isChecked())
+            return
         if e.button()==Qt.MouseButton.LeftButton: self.clicked.emit(self.shoe)
         elif e.button()==Qt.MouseButton.RightButton: self.pin_requested.emit(self.shoe)
         super().mousePressEvent(e)
@@ -754,9 +791,11 @@ class SidebarDetail(QWidget):
         
         self.gallery=QFrame(); self.gallery.setFixedHeight(210); self.gallery.setObjectName("gallery")
         gl=QHBoxLayout(self.gallery); gl.setContentsMargins(4,0,4,0); gl.setSpacing(4)
-        self.prev_btn=mk_btn("‹","action_btn"); self.prev_btn.setFixedSize(28,28); self.prev_btn.clicked.connect(self._prev)
+        self.prev_btn=QPushButton("◀"); self.prev_btn.setFixedSize(28,28); self.prev_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.prev_btn.clicked.connect(self._prev)
         self.gal_img=QLabel(); self.gal_img.setAlignment(Qt.AlignmentFlag.AlignCenter); self.gal_img.setSizePolicy(QSizePolicy.Policy.Expanding,QSizePolicy.Policy.Expanding)
-        self.next_btn=mk_btn("›","action_btn"); self.next_btn.setFixedSize(28,28); self.next_btn.clicked.connect(self._next)
+        self.next_btn=QPushButton("▶"); self.next_btn.setFixedSize(28,28); self.next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.next_btn.clicked.connect(self._next)
         gl.addWidget(self.prev_btn,0,Qt.AlignmentFlag.AlignVCenter); gl.addWidget(self.gal_img); gl.addWidget(self.next_btn,0,Qt.AlignmentFlag.AlignVCenter); cl.addWidget(self.gallery)
         self.counter=QLabel(); self.counter.setAlignment(Qt.AlignmentFlag.AlignCenter); cl.addWidget(self.counter)
         self.strip_scroll=QScrollArea(); self.strip_scroll.setFixedHeight(50)
@@ -782,6 +821,11 @@ class SidebarDetail(QWidget):
         self.gallery.setStyleSheet(f"QFrame#gallery{{background-color:{c['SIDEBAR']};}}")
         self.strip_scroll.setStyleSheet(f"QScrollArea{{background:{c['SIDEBAR']};border:none;}}QWidget{{background:{c['SIDEBAR']};}}")
         if hasattr(self, 'loading_lbl'): self.loading_lbl.setStyleSheet(f"color:{c['DIM']};font-size:14px;")
+        
+        btn_style = f"QPushButton{{background:{c['SURFACE2']};color:{c['TEXT']};border-radius:4px;border:none;font-size:12px;padding:0px;}}QPushButton:hover{{background:{c['FAINT']};}}"
+        self.prev_btn.setStyleSheet(btn_style)
+        self.next_btn.setStyleSheet(btn_style)
+
         if self._shoe: self._refresh_detail()
         self._refresh_gallery()
 
@@ -1090,9 +1134,9 @@ class CompareColumn(QFrame):
         nav_w = QWidget(img_frame); nav_w.setStyleSheet("background:transparent;")
         nav_w.setGeometry(0, 0, self.COL_W, self.IMG_H)
         nav_l = QHBoxLayout(nav_w); nav_l.setContentsMargins(2,0,2,0)
-        self.prev_btn = QPushButton("‹"); self.prev_btn.setFixedSize(22,22)
+        self.prev_btn = QPushButton("◀"); self.prev_btn.setFixedSize(22,22)
         self.prev_btn.clicked.connect(self._prev_img)
-        self.next_btn = QPushButton("›"); self.next_btn.setFixedSize(22,22)
+        self.next_btn = QPushButton("▶"); self.next_btn.setFixedSize(22,22)
         self.next_btn.clicked.connect(self._next_img)
         nav_l.addWidget(self.prev_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         nav_l.addStretch()
@@ -1235,8 +1279,8 @@ class CompareColumn(QFrame):
             CompareColumn {{ background:{c['SIDEBAR']}; border-right:1px solid {c['BORDER']}; }}
         """)
         self.accent_bar.setStyleSheet(f"background:{c['AMBER']};border:none;")
-        self.prev_btn.setStyleSheet(f"QPushButton{{background:{c['SURFACE2']};color:{c['TEXT']};border-radius:4px;border:none;font-size:14px;font-weight:bold;}}QPushButton:hover{{background:{c['FAINT']};}}")
-        self.next_btn.setStyleSheet(f"QPushButton{{background:{c['SURFACE2']};color:{c['TEXT']};border-radius:4px;border:none;font-size:14px;font-weight:bold;}}QPushButton:hover{{background:{c['FAINT']};}}")
+        self.prev_btn.setStyleSheet(f"QPushButton{{background:{c['SURFACE2']};color:{c['TEXT']};border-radius:4px;border:none;font-size:14px;font-weight:bold;padding:0px;}}QPushButton:hover{{background:{c['FAINT']};}}")
+        self.next_btn.setStyleSheet(f"QPushButton{{background:{c['SURFACE2']};color:{c['TEXT']};border-radius:4px;border:none;font-size:14px;font-weight:bold;padding:0px;}}QPushButton:hover{{background:{c['FAINT']};}}")
         self.unpin_btn.setStyleSheet(f"QPushButton{{background:{c['SURFACE2']};color:{c['TEXT2']};border-radius:6px;border:none;font-size:11px;padding:2px 6px;}}QPushButton:hover{{background:{c['RED']};color:#ffffff;}}")
         self.report_btn.setStyleSheet(f"QPushButton{{background:#f0fdf4;color:#16a34a;border-radius:6px;border:1px solid #16a34a;font-size:11px;padding:2px 6px;}}QPushButton:hover{{background:#16a34a;color:#ffffff;}}")
         
@@ -1410,6 +1454,7 @@ class ShoeDatabase(QMainWindow):
         self.resize(1200,760); self.setMinimumSize(900,600); self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._cards=[]; self._all_shoes=[]; self._selected_shoe=None
         self._compare=None
+        self._multi_selected_shoes = set()
         self._img_loader = AsyncImageLoader()
         self._img_loader.loaded.connect(self._on_image_loaded)
         self._img_loader.start()
@@ -1441,6 +1486,17 @@ class ShoeDatabase(QMainWindow):
 
         self.search_box=QLineEdit(); self.search_box.setPlaceholderText("Search brand, model, iDAPT…"); self.search_box.setFixedWidth(200)
         self.search_box.textChanged.connect(lambda: self._search_timer.start(150)); tl.addWidget(self.search_box)
+
+        self.export_btn = mk_btn("Export Selected", "primary_btn")
+        self.export_btn.setStyleSheet("background: #10b981; color: white;")
+        self.export_btn.hide()
+        self.export_btn.clicked.connect(self._export_selected)
+        tl.addWidget(self.export_btn)
+
+        self.clear_sel_btn = mk_btn("Clear Selection", "action_btn")
+        self.clear_sel_btn.hide()
+        self.clear_sel_btn.clicked.connect(self._clear_multi_selection)
+        tl.addWidget(self.clear_sel_btn)
 
         add_btn=mk_btn("+ Add Shoe","primary_btn"); add_btn.setToolTip("Add New Shoe"); add_btn.clicked.connect(self._add_shoe); tl.addWidget(add_btn)
 
@@ -1504,6 +1560,85 @@ class ShoeDatabase(QMainWindow):
         self._compare.clear_all()
         self._refresh_card_pin_states()
         self._update_sidebar_mode()
+
+    def _on_multi_select_toggled(self, shoe, checked):
+        if checked:
+            self._multi_selected_shoes.add(shoe["id"])
+        else:
+            self._multi_selected_shoes.discard(shoe["id"])
+            
+        active = len(self._multi_selected_shoes) > 0
+        self.export_btn.setVisible(active)
+        self.clear_sel_btn.setVisible(active)
+        
+        for card in self._cards:
+            card.set_multi_select_mode(active, card.shoe["id"] in self._multi_selected_shoes)
+
+    def _export_selected(self):
+        if not self._multi_selected_shoes: return
+        path, _ = QFileDialog.getSaveFileName(self, "Export Selected to Excel", "Selected_Shoes.xlsx", "Excel Files (*.xlsx)")
+        if not path: return
+        
+        try:
+            import openpyxl
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Selected Shoes"
+            
+            headers = [
+                "idapt#", "Safety?", "MAA for wet ice", "MAA for cold ice", "Final MAA score",
+                "Listed on the RMT website (Y/N)", "RMT/Yes/Pass", "Prototype", "Client",
+                "Brand", "Name", "Model#", "Type", "technology", "Size", "Size weighed",
+                "Weight (g)", "Upper", "Shoe", "Date Manufactured", "Date Received", "Date returned",
+                "Date to complete test", "Date Tested", "Report date", "Date sent to client",
+                "Report #", "idapt#2", "Test surface", "Protocol", "weight of left shoe",
+                "weight of right shoe", "test id", "Hardness R1", "Hardness R2", "Hardness R3",
+                "HardnessL1", "HardnessL2", "HardnessL3", "Variation Within Spot <5",
+                "Hardness R1.1", "Hardness R2.1", "Hardness R3.1", "Hardness L1", "Hardness L2",
+                "Hardness L3", "Variation Within Spot <5.1", "Hardness measurement date",
+                "SATRA test date", "Website", "Size Range", "Features/Upper", "Insulation",
+                "Height", "Sole (Inner/Midsole/Outersole)", "Standard", "To test",
+                "Repeated test production", "Repeated test prototype", "MAA",
+                "Received 1", "Received 2", "Received 3", "Received 4"
+            ]
+            ws.append(headers)
+            
+            selected_shoes = [s for s in self._all_shoes if s["id"] in self._multi_selected_shoes]
+            
+            for shoe in selected_shoes:
+                try: lab = json.loads(shoe.get("lab_data") or "{}")
+                except: lab = {}
+                
+                row = []
+                for h in headers:
+                    if h == "idapt#" or h == "idapt#2":
+                        row.append(shoe.get("idapt_id", ""))
+                    elif h == "Brand":
+                        row.append(shoe.get("brand", ""))
+                    elif h == "Name":
+                        row.append(shoe.get("model", ""))
+                    elif h == "Size":
+                        row.append(shoe.get("size", ""))
+                    elif h == "MAA":
+                        row.append(shoe.get("maa_mean", ""))
+                    else:
+                        row.append(lab.get(h, ""))
+                ws.append(row)
+                
+            wb.save(path)
+            QMessageBox.information(self, "Export Successful", f"Successfully exported {len(selected_shoes)} shoes to\n{path}")
+            
+            self._clear_multi_selection()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"Failed to export: {e}")
+
+    def _clear_multi_selection(self):
+        self._multi_selected_shoes.clear()
+        self.export_btn.hide()
+        self.clear_sel_btn.hide()
+        for card in self._cards:
+            card.set_multi_select_mode(False)
 
     def _open_shoe_report(self, shoe):
         reports = []
@@ -1615,10 +1750,12 @@ class ShoeDatabase(QMainWindow):
                 card=ShoeCard(shoe)
                 card.clicked.connect(self._on_card_click)
                 card.pin_requested.connect(self._toggle_pin)
+                card.multi_select_toggled.connect(self._on_multi_select_toggled)
                 self._card_pool.append(card)
                 
             card.set_selected(shoe["id"]==sel_id)
             card.set_pinned(self._compare.is_pinned(shoe) if self._compare else False)
+            card.set_multi_select_mode(len(self._multi_selected_shoes) > 0, shoe["id"] in self._multi_selected_shoes)
             self.flow.addWidget(card)
             self._cards.append(card)
             card.show()

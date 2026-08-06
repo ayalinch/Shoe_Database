@@ -4,3 +4,4 @@ shoes.db
 Photos and Reports/
 __pycache__/
 Compiled/
+config.json
