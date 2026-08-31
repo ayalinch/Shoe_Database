@@ -71,6 +71,7 @@ CARD_H   = THUMB_H + 50
 
 # ── Global pixmap cache ──────────────────────────────────────────────────────
 _PIXMAP_CACHE = {}
+_RAW_PIXMAP_CACHE = {}
 
 # ── Excel Lab Fields ────────────────────────────────────────────────────────
 LAB_FIELDS = [
@@ -273,6 +274,25 @@ class ClickableLabel(QLabel):
     def mousePressEvent(self, e):
         if e.button()==Qt.MouseButton.LeftButton: self.clicked.emit(self.idx)
         super().mousePressEvent(e)
+
+class InfoButton(QPushButton):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(24, 24)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("How to use this app")
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        c = get_c()
+        rect = QRect(2, 2, self.width()-4, self.height()-4)
+        p.setPen(QPen(QColor(c['DIM']), 1.2))
+        p.setBrush(QColor(c['SURFACE2']))
+        p.drawEllipse(rect)
+        font = QFont(self.font()); font.setBold(True); font.setPointSize(9)
+        p.setFont(font); p.setPen(QColor(c['TEXT2']))
+        p.drawText(rect, Qt.AlignmentFlag.AlignCenter, "i")
+        p.end()
 
 class DynamicScrollArea(QScrollArea):
     def resizeEvent(self, event):
@@ -773,7 +793,7 @@ class DetailLoadWorker(QThread):
 class SidebarDetail(QWidget):
     edit_requested=Signal(dict); delete_requested=Signal(dict)
     def __init__(self):
-        super().__init__(); self.setObjectName("sidebar"); self._shoe=None; self._imgs=[]; self._reports=[]; self._idx=0; self._strip_lbls=[]; self._build()
+        super().__init__(); self.setObjectName("sidebar"); self._shoe=None; self._imgs=[]; self._reports=[]; self._idx=0; self._strip_lbls=[]; self._user_sized=False; self._build()
 
     def _build(self):
         root=QVBoxLayout(self); root.setContentsMargins(0,0,0,0); root.setSpacing(0)
@@ -788,31 +808,72 @@ class SidebarDetail(QWidget):
         
         self.content_widget = QWidget()
         cl = QVBoxLayout(self.content_widget); cl.setContentsMargins(0,0,0,0); cl.setSpacing(0)
-        
-        self.gallery=QFrame(); self.gallery.setFixedHeight(210); self.gallery.setObjectName("gallery")
+
+        # ── image area ──
+        self.gallery=QFrame(); self.gallery.setObjectName("gallery")
         gl=QHBoxLayout(self.gallery); gl.setContentsMargins(4,0,4,0); gl.setSpacing(4)
         self.prev_btn=QPushButton("◀"); self.prev_btn.setFixedSize(28,28); self.prev_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.prev_btn.clicked.connect(self._prev)
-        self.gal_img=QLabel(); self.gal_img.setAlignment(Qt.AlignmentFlag.AlignCenter); self.gal_img.setSizePolicy(QSizePolicy.Policy.Expanding,QSizePolicy.Policy.Expanding)
+        self.gal_img=AspectImageWidget()
         self.next_btn=QPushButton("▶"); self.next_btn.setFixedSize(28,28); self.next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.next_btn.clicked.connect(self._next)
-        gl.addWidget(self.prev_btn,0,Qt.AlignmentFlag.AlignVCenter); gl.addWidget(self.gal_img); gl.addWidget(self.next_btn,0,Qt.AlignmentFlag.AlignVCenter); cl.addWidget(self.gallery)
-        self.counter=QLabel(); self.counter.setAlignment(Qt.AlignmentFlag.AlignCenter); cl.addWidget(self.counter)
+        gl.addWidget(self.prev_btn,0,Qt.AlignmentFlag.AlignVCenter); gl.addWidget(self.gal_img); gl.addWidget(self.next_btn,0,Qt.AlignmentFlag.AlignVCenter)
+
+        # ── detail area ──
+        detail_w = QWidget(); dll = QVBoxLayout(detail_w); dll.setContentsMargins(0,0,0,0); dll.setSpacing(0)
+        self.counter=QLabel(); self.counter.setAlignment(Qt.AlignmentFlag.AlignCenter); dll.addWidget(self.counter)
         self.strip_scroll=QScrollArea(); self.strip_scroll.setFixedHeight(50)
         self.strip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.strip_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.strip_scroll.setObjectName("strip_scroll")
         sw=QWidget(); self.strip_layout=QHBoxLayout(sw); self.strip_layout.setContentsMargins(6,4,6,4); self.strip_layout.setSpacing(4); self.strip_layout.addStretch()
-        self.strip_scroll.setWidget(sw); self.strip_scroll.setWidgetResizable(True); cl.addWidget(self.strip_scroll)
-        self.bar=QFrame(); self.bar.setFixedHeight(3); cl.addWidget(self.bar)
+        self.strip_scroll.setWidget(sw); self.strip_scroll.setWidgetResizable(True); dll.addWidget(self.strip_scroll)
+        self.bar=QFrame(); self.bar.setFixedHeight(3); dll.addWidget(self.bar)
         self.scroll=QScrollArea(); self.scroll.setWidgetResizable(True)
         self.inner=QWidget(); self.inner.setObjectName("sidebar_inner")
         self.inner_l=QVBoxLayout(self.inner); self.inner_l.setContentsMargins(0,0,0,16); self.inner_l.setSpacing(0)
-        self.scroll.setWidget(self.inner); cl.addWidget(self.scroll)
-        
+        self.scroll.setWidget(self.inner); dll.addWidget(self.scroll, 1)
+
+        # ── draggable divider between image and info ──
+        self.splitter = QSplitter(Qt.Orientation.Vertical)
+        self.splitter.addWidget(self.gallery)
+        self.splitter.addWidget(detail_w)
+        self.splitter.setHandleWidth(6)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.splitterMoved.connect(self._on_splitter_moved)
+        cl.addWidget(self.splitter)
+
         self.stack.addWidget(self.content_widget)
         self.stack.setCurrentIndex(1)
         self._worker = None
+
+    def _natural_gallery_height(self):
+        w = self.gallery.width() if self.gallery.width() > 0 else 330
+        path = self.gal_img._image_path
+        if path and os.path.isfile(path):
+            px = load_raw_pixmap(path)
+            if px and not px.isNull() and px.width() > 0:
+                return max(210, int(w * px.height() / px.width()))
+        return 210
+
+    def _apply_default_sizes(self):
+        h = self._natural_gallery_height()
+        self._user_sized = False
+        if hasattr(self, 'splitter'):
+            total = self.splitter.height()
+            self.splitter.setSizes([h, max(50, total - h)])
+
+    def _on_splitter_moved(self, pos, index):
+        self._user_sized = True
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._apply_default_sizes()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not self._user_sized:
+            self._apply_default_sizes()
 
     def refresh_theme(self):
         c=get_c()
@@ -861,12 +922,14 @@ class SidebarDetail(QWidget):
 
     def _refresh_gallery(self):
         if self._imgs:
-            px=load_pixmap(self._imgs[self._idx],330,206)
-            self.gal_img.setPixmap(px.scaled(330,206,Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation))
+            self.gal_img.set_image_path(self._imgs[self._idx])
             self.counter.setText(f"{self._idx+1} / {len(self._imgs)}")
         else:
-            self.gal_img.setPixmap(_placeholder(330,206)); self.counter.setText("No images" if self._shoe else "")
+            self.gal_img.set_image_path("")
+            self.counter.setText("No images" if self._shoe else "")
         self.prev_btn.setVisible(len(self._imgs)>1); self.next_btn.setVisible(len(self._imgs)>1)
+        if not self._user_sized:
+            self._apply_default_sizes()
 
     def _refresh_strip(self):
         while self.strip_layout.count()>1:
@@ -1098,6 +1161,84 @@ class ImportDialog(QDialog):
 
 # ── Pinned Tray ───────────────────────────────────────────────────────────────
 # ── Compare Panel ────────────────────────────────────────────────────────────
+def load_raw_pixmap(path):
+    if not path or not os.path.isfile(path):
+        return None
+    if path not in _RAW_PIXMAP_CACHE:
+        px = QPixmap(path)
+        if px.isNull():
+            return None
+        _RAW_PIXMAP_CACHE[path] = px
+    return _RAW_PIXMAP_CACHE[path]
+
+
+class ImageOverlayHost(QWidget):
+    """QWidget that automatically keeps an overlaid nav child sized to itself,
+    so overlay arrows always track the image area as it resizes (e.g. splitter drags)."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._nav = None
+
+    def set_nav_widget(self, w):
+        self._nav = w
+        if w is not None:
+            w.setParent(self)
+            w.setGeometry(0, 0, self.width(), self.height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._nav is not None:
+            self._nav.setGeometry(0, 0, self.width(), self.height())
+
+
+class AspectImageWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._image_path = ""
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def set_image_path(self, path):
+        self._image_path = path
+        self.update()
+
+    def minimumSizeHint(self):
+        return QSize(50, 50)
+
+    def sizeHint(self):
+        return QSize(200, 180)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        w, h = self.width(), self.height()
+        if w <= 0 or h <= 0:
+            painter.end()
+            return
+
+        c = get_c()
+        painter.fillRect(self.rect(), QColor("#ffffff"))
+
+        if self._image_path and os.path.isfile(self._image_path):
+            px = load_raw_pixmap(self._image_path)
+            if px and not px.isNull():
+                scaled = px.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                x = (w - scaled.width()) // 2
+                y = (h - scaled.height()) // 2
+                painter.drawPixmap(x, y, scaled)
+                painter.end()
+                return
+
+        painter.fillRect(self.rect(), QColor(c['CARD']))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(c['SURFACE2']))
+        painter.drawRoundedRect(6, 6, max(1, w-12), max(1, h-12), 8, 8)
+        painter.setFont(QFont("Arial", 24))
+        painter.setPen(QColor(c['DIM']))
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "👟")
+        painter.end()
+
+
 class CompareColumn(QFrame):
     """One shoe column inside the ComparePanel."""
     unpin_requested = Signal(dict)
@@ -1109,11 +1250,12 @@ class CompareColumn(QFrame):
     def __init__(self, shoe, parent=None):
         super().__init__(parent)
         self.shoe = shoe
-        self.setFixedWidth(self.COL_W)
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.setMinimumWidth(140)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._imgs = []
         self._reports = []
         self._img_idx = 0
+        self._user_sized = False
         self._build()
         self._load_media()
         self.refresh_theme()
@@ -1122,17 +1264,16 @@ class CompareColumn(QFrame):
         root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0); root.setSpacing(0)
 
         # ── image area ──
-        img_frame = QFrame(); img_frame.setFixedHeight(self.IMG_H)
-        img_frame.setStyleSheet("background:#ffffff;")
-        il = QVBoxLayout(img_frame); il.setContentsMargins(0,0,0,0)
-        self.img_lbl = QLabel(); self.img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.img_lbl.setFixedSize(self.COL_W, self.IMG_H)
-        self.img_lbl.setStyleSheet("background:transparent;")
+        img_frame = ImageOverlayHost(); img_frame.setStyleSheet("background:#ffffff;")
+        self.img_frame = img_frame
+        il = QVBoxLayout(img_frame); il.setContentsMargins(0,0,0,0); il.setSpacing(0)
+        self.img_lbl = AspectImageWidget()
         il.addWidget(self.img_lbl)
 
         # prev/next nav overlaid
-        nav_w = QWidget(img_frame); nav_w.setStyleSheet("background:transparent;")
-        nav_w.setGeometry(0, 0, self.COL_W, self.IMG_H)
+        nav_w = QWidget(); nav_w.setStyleSheet("background:transparent;")
+        self.nav_w = nav_w
+        img_frame.set_nav_widget(nav_w)
         nav_l = QHBoxLayout(nav_w); nav_l.setContentsMargins(2,0,2,0)
         self.prev_btn = QPushButton("◀"); self.prev_btn.setFixedSize(22,22)
         self.prev_btn.clicked.connect(self._prev_img)
@@ -1141,19 +1282,15 @@ class CompareColumn(QFrame):
         nav_l.addWidget(self.prev_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         nav_l.addStretch()
         nav_l.addWidget(self.next_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        root.addWidget(img_frame)
 
-        # ── thin accent bar ──
-        self.accent_bar = QFrame(); self.accent_bar.setFixedHeight(3); root.addWidget(self.accent_bar)
-
-        # ── scrollable detail ──
+        # ── detail area (accent bar + scroll + buttons) ──
+        detail_w = QWidget(); dl = QVBoxLayout(detail_w); dl.setContentsMargins(0,0,0,0); dl.setSpacing(0)
+        self.accent_bar = QFrame(); self.accent_bar.setFixedHeight(3); dl.addWidget(self.accent_bar)
         scroll = QScrollArea(); scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         inner = QWidget(); self.detail_lay = QVBoxLayout(inner)
         self.detail_lay.setContentsMargins(10,10,10,10); self.detail_lay.setSpacing(4)
-        scroll.setWidget(inner); root.addWidget(scroll, 1)
-
-        # ── bottom button bar ──
+        scroll.setWidget(inner); dl.addWidget(scroll, 1)
         btn_w = QWidget(); btn_l = QHBoxLayout(btn_w)
         btn_l.setContentsMargins(8,6,8,8); btn_l.setSpacing(6)
         self.report_btn = QPushButton("Report")
@@ -1163,9 +1300,46 @@ class CompareColumn(QFrame):
         self.unpin_btn.setFixedHeight(26)
         self.unpin_btn.clicked.connect(lambda: self.unpin_requested.emit(self.shoe))
         btn_l.addWidget(self.report_btn, 1); btn_l.addWidget(self.unpin_btn, 1)
-        root.addWidget(btn_w)
+        dl.addWidget(btn_w)
+
+        # ── draggable divider between image and info ──
+        self.splitter = QSplitter(Qt.Orientation.Vertical)
+        self.splitter.addWidget(img_frame)
+        self.splitter.addWidget(detail_w)
+        self.splitter.setHandleWidth(6)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.splitterMoved.connect(self._on_splitter_moved)
+        root.addWidget(self.splitter)
 
         self._fill_detail()
+
+    def _natural_image_height(self):
+        w = self.width() if self.width() > 0 else self.COL_W
+        path = self.img_lbl._image_path
+        if path and os.path.isfile(path):
+            px = load_raw_pixmap(path)
+            if px and not px.isNull() and px.width() > 0:
+                return max(self.IMG_H, int(w * px.height() / px.width()))
+        return self.IMG_H
+
+    def _apply_default_sizes(self):
+        h = self._natural_image_height()
+        self._user_sized = False
+        if hasattr(self, 'splitter'):
+            total = self.splitter.height()
+            self.splitter.setSizes([h, max(50, total - h)])
+
+    def _on_splitter_moved(self, pos, index):
+        self._user_sized = True
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._apply_default_sizes()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not self._user_sized:
+            self._apply_default_sizes()
 
     def _load_media(self):
         shoe = self.shoe
@@ -1183,17 +1357,22 @@ class CompareColumn(QFrame):
         self.report_btn.setVisible(bool(self._reports))
 
     def _show_img(self):
-        if self._imgs:
-            px = load_pixmap(self._imgs[self._img_idx], self.COL_W, self.IMG_H)
-            self.img_lbl.setPixmap(px.scaled(self.COL_W, self.IMG_H,
-                Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        if self._imgs and self._img_idx < len(self._imgs):
+            self.img_lbl.set_image_path(self._imgs[self._img_idx])
         else:
-            self.img_lbl.setPixmap(_placeholder(self.COL_W, self.IMG_H))
+            self.img_lbl.set_image_path("")
+        if not self._user_sized:
+            self._apply_default_sizes()
 
     def _prev_img(self):
-        if self._imgs: self._img_idx = (self._img_idx - 1) % len(self._imgs); self._show_img()
+        if self._imgs:
+            self._img_idx = (self._img_idx - 1) % len(self._imgs)
+            self._show_img()
+
     def _next_img(self):
-        if self._imgs: self._img_idx = (self._img_idx + 1) % len(self._imgs); self._show_img()
+        if self._imgs:
+            self._img_idx = (self._img_idx + 1) % len(self._imgs)
+            self._show_img()
 
     def _fill_detail(self):
         c = get_c(); shoe = self.shoe
@@ -1285,16 +1464,7 @@ class CompareColumn(QFrame):
         self.report_btn.setStyleSheet(f"QPushButton{{background:#f0fdf4;color:#16a34a;border-radius:6px;border:1px solid #16a34a;font-size:11px;padding:2px 6px;}}QPushButton:hover{{background:#16a34a;color:#ffffff;}}")
         
         if hasattr(self, 'img_lbl'):
-            if self._imgs:
-                path = self._imgs[self._img_idx]
-                if not path or not os.path.isfile(path):
-                    self.img_lbl.setPixmap(_placeholder(self.COL_W, self.IMG_H))
-                else:
-                    px = load_pixmap(path, self.COL_W, self.IMG_H)
-                    self.img_lbl.setPixmap(px.scaled(self.COL_W, self.IMG_H,
-                        Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-            else:
-                self.img_lbl.setPixmap(_placeholder(self.COL_W, self.IMG_H))
+            self.img_lbl.update()
                 
         self._fill_detail()
 
@@ -1317,7 +1487,7 @@ class ComparePanel(QWidget):
         # header bar
         self.header = QFrame(); self.header.setFixedHeight(36); self.header.setObjectName("compare_header")
         hl = QHBoxLayout(self.header); hl.setContentsMargins(12,0,12,0); hl.setSpacing(8)
-        self.title_lbl = QLabel("📌 Comparing")
+        self.title_lbl = QLabel("Comparing")
         self.title_lbl.setStyleSheet("font-size:13px;font-weight:700;background:transparent;")
         self.hint_lbl = QLabel("Right-click cards to pin/unpin")
         self.hint_lbl.setStyleSheet("font-size:10px;background:transparent;")
@@ -1334,7 +1504,6 @@ class ComparePanel(QWidget):
         self.col_inner = QWidget()
         self.col_lay = QHBoxLayout(self.col_inner)
         self.col_lay.setContentsMargins(0,0,0,0); self.col_lay.setSpacing(0)
-        self.col_lay.addStretch()
         self.col_scroll.setWidget(self.col_inner)
         root.addWidget(self.col_scroll, 1)
 
@@ -1362,7 +1531,7 @@ class ComparePanel(QWidget):
         col.unpin_requested.connect(self._on_unpin)
         col.open_report_requested.connect(self._on_open_report)
         self._columns[shoe["id"]] = col
-        self.col_lay.insertWidget(self.col_lay.count()-1, col)
+        self.col_lay.addWidget(col)
         self.empty_lbl.hide()
         col.refresh_theme()
 
@@ -1482,7 +1651,9 @@ class ShoeDatabase(QMainWindow):
         if os.path.exists(LOGO_PATH):
             pix=QPixmap(LOGO_PATH).scaledToHeight(24,Qt.TransformationMode.SmoothTransformation)
             self.top_logo.setPixmap(pix); tl.addWidget(self.top_logo)
-        title_lbl=QLabel("Shoe Database"); title_lbl.setObjectName("topbar_title"); tl.addWidget(title_lbl); tl.addStretch()
+        title_lbl=QLabel("Shoe Database"); title_lbl.setObjectName("topbar_title"); tl.addWidget(title_lbl)
+        self.info_btn=InfoButton(); self.info_btn.clicked.connect(self._show_guide); tl.addWidget(self.info_btn)
+        tl.addStretch()
 
         self.search_box=QLineEdit(); self.search_box.setPlaceholderText("Search brand, model, iDAPT…"); self.search_box.setFixedWidth(200)
         self.search_box.textChanged.connect(lambda: self._search_timer.start(150)); tl.addWidget(self.search_box)
@@ -1531,6 +1702,43 @@ class ShoeDatabase(QMainWindow):
         self.app_stack.addWidget(self.db_page)
 
     def _enter_app(self): self.app_stack.setCurrentIndex(1); self.setFocus()
+
+    def _show_guide(self):
+        if getattr(self, '_guide_popup', None) is not None:
+            try: self._guide_popup.close()
+            except: pass
+            self._guide_popup = None
+            return
+        c = get_c()
+        popup = QDialog(self, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        popup.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        popup.setStyleSheet(f"QDialog{{background:{c['SURFACE']};border:1px solid {c['BORDER']};border-radius:12px;}}")
+        lay = QVBoxLayout(popup); lay.setContentsMargins(18,16,18,16); lay.setSpacing(6)
+        head = QLabel("Tool Tips")
+        head.setStyleSheet(f"color:{c['ACCENT']};font-size:14px;font-weight:700;background:transparent;")
+        lay.addWidget(head)
+        body = QLabel(
+            f"<div style='color:{c['TEXT2']};font-size:12px;line-height:1.55;background:transparent;'>"
+            f"<b style='color:{c['TEXT']}'>Compare shoes</b><br/>"
+            f"Right-click any shoe card to pin it for side-by-side comparison. "
+            f"Right-click again (or press <b>Unpin</b>) to remove a shoe.<br/><br/>"
+            f"<b style='color:{c['TEXT']}'>Resize photos</b><br/>"
+            f"Drag the divider bar directly under a photo up or down to make "
+            f"that image larger or smaller. The photo's proportions are never distorted.<br/><br/>"
+            f"<b style='color:{c['TEXT']}'>Browse photos</b><br/>"
+            f"Use the <b>◀ ▶</b> arrows shown on a photo to cycle through that shoe's images.<br/><br/>"
+            f"<b style='color:{c['TEXT']}'>Clear</b><br/>"
+            f"Press <b>Clear all</b> above the panel to remove every shoe from the comparison."
+            f"</div>"
+        )
+        body.setWordWrap(True)
+        body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(body)
+        popup.setFixedWidth(360)
+        pos = self.info_btn.mapToGlobal(QPoint(0, self.info_btn.height() + 4))
+        popup.move(pos)
+        self._guide_popup = popup
+        popup.show()
 
     def _toggle_pin(self, shoe):
         if self._compare.is_pinned(shoe):
@@ -1662,6 +1870,7 @@ class ShoeDatabase(QMainWindow):
         keys_to_delete = [k for k in _PIXMAP_CACHE.keys() if not k[0] or not os.path.isfile(k[0])]
         for k in keys_to_delete:
             del _PIXMAP_CACHE[k]
+        _RAW_PIXMAP_CACHE.clear()
 
         if hasattr(self, '_cards'):
             for card in self._cards:
@@ -1672,7 +1881,7 @@ class ShoeDatabase(QMainWindow):
 
     def _run_sync(self):
         dlg=SyncDialog(self); dlg.exec()
-        _PIXMAP_CACHE.clear(); self._do_refresh()
+        _PIXMAP_CACHE.clear(); _RAW_PIXMAP_CACHE.clear(); self._do_refresh()
 
     def _export_excel(self):
         path,_=QFileDialog.getSaveFileName(self,"Export Database","UHN_KITE_Database.csv","CSV Files (*.csv)")
