@@ -89,6 +89,87 @@ LAB_FIELDS = [
     "Sole (Inner/Midsole/Outersole)", "Standard", "To test", "Repeated test production",
     "Repeated test prototype", "MAA Received 1", "Received 2", "Received 3", "Received 4"
 ]
+# NOTE: LAB_FIELDS is now only a fallback for the edit form on fresh installs.
+# Sync reads the Excel header row dynamically and caches it in config.json
+# under "excel_headers" — see SyncWorker.
+
+# ── Dynamic Excel header mapping ─────────────────────────────────────────────
+# Ordered alias lists: first match wins when locating a core column.
+# "maa" is preferred over "final maa score" to match the old sync behavior
+# (old layout: maa_mean came from the "MAA" column). Add new canonical names
+# here if the master list changes again.
+ID_ALIASES    = ["idapt#", "idapt id", "idapt_id", "idapt", "idapt#2"]
+BRAND_ALIASES = ["brand", "brand name"]
+MODEL_ALIASES = ["name", "model#", "model"]
+SIZE_ALIASES  = ["size"]
+MAA_ALIASES   = ["maa", "final maa score", "maa for ice"]
+
+ID_SET    = set(ID_ALIASES)
+BRAND_SET = set(BRAND_ALIASES)
+MODEL_SET = set(MODEL_ALIASES)
+SIZE_SET  = set(SIZE_ALIASES)
+MAA_SET   = set(MAA_ALIASES)
+_SKIP_LAB_FORM = ID_SET | BRAND_SET | MODEL_SET | SIZE_SET
+
+def _base_header(h):
+    """Normalize a header name for comparison (lowercase, strip dedup suffix)."""
+    return re.sub(r"\s*\(\d+\)$", "", str(h).strip().lower())
+
+def _clean_headers(raw_headers):
+    """Convert a raw Excel header row to unique names; blank cells -> None.
+    Duplicates get a " (n)" suffix (NOT ".n" — real headers like 'Hardness
+    R1.1' legitimately end in .1 and must not be treated as duplicates)."""
+    headers=[]; seen={}
+    for h in raw_headers:
+        name=str(h).strip() if h is not None else ""
+        if not name: headers.append(None); continue
+        key=_base_header(name)
+        if key in seen:
+            seen[key]+=1; name=f"{name} ({seen[key]})"
+        else:
+            seen[key]=1
+        headers.append(name)
+    return headers
+
+def _find_col(headers, aliases, default=None, contains=None):
+    """Index of the column matching any alias (in alias order). If no exact
+    match and `contains` terms are given, falls back to a containment match —
+    but only when exactly ONE header matches, so ambiguous columns (e.g. both
+    'MAA' and 'MAA for up only') never silently pick the wrong one."""
+    norm=[_base_header(h) if h else "" for h in headers]
+    for a in aliases:
+        if a in norm: return norm.index(a)
+    if contains:
+        hits=[i for i,h in enumerate(norm) if h and any(t in h for t in contains)]
+        if len(hits)==1: return hits[0]
+    return default
+
+def _core_kind(h):
+    b=_base_header(h)
+    if b in ID_SET: return "id"
+    if b in BRAND_SET: return "brand"
+    if b in MODEL_SET: return "model"
+    if b in SIZE_SET: return "size"
+    if b in MAA_SET: return "maa"
+    return None
+
+def lab_form_fields(existing_lab=None):
+    """Lab field list for the edit form: the last synced Excel layout (or the
+    LAB_FIELDS fallback), minus the columns mapped to core fields (they're
+    edited via the core tab instead), plus any extra keys already stored on
+    the record. Core filtering is by base name, but dedup is by full name so
+    duplicate columns ('Standard (2)') survive."""
+    src=_config.get("excel_headers") or LAB_FIELDS
+    skip=set(_SKIP_LAB_FORM) | set(_config.get("excel_core_map",{}))
+    fields=[]; seen=set()
+    for h in src:
+        if not h: continue
+        if _base_header(h) in skip or h.strip().lower() in seen: continue
+        fields.append(h); seen.add(h.strip().lower())
+    for k in (existing_lab or {}):
+        if str(k).strip() and str(k).strip().lower() not in seen:
+            fields.append(k); seen.add(str(k).strip().lower())
+    return fields
 
 # ── Themes ──────────────────────────────────────────────────────────────────
 THEMES = {
@@ -155,9 +236,9 @@ def generate_css():
     QSplitter::handle {{ background:{c['BORDER']}; width:1px; }}
     QSplitter::handle:horizontal:hover {{ background:{c['ACCENT']}; }}
 
-    QWidget#home_widget {{ background: #ffffff; }}
-    QLabel#home_title {{ font-size:38px; font-weight:800; color:#18181b; letter-spacing:1px; }}
-    QLabel#home_subtitle {{ font-size:16px; color:#52525b; font-weight:500; }}
+    QWidget#home_widget {{ background: {c['BG']}; }}
+    QLabel#home_title {{ font-size:38px; font-weight:800; color:{c['TEXT']}; letter-spacing:1px; }}
+    QLabel#home_subtitle {{ font-size:16px; color:{c['TEXT2']}; font-weight:500; }}
 
     QPushButton#home_btn {{
         background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 {c['ACCENT']},stop:1 #1d4ed8);
@@ -204,14 +285,15 @@ class SplashScreen(QWidget):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setFixedSize(480, 300)
-        self.setStyleSheet("background:#ffffff; border-radius:18px;")
+        c=get_c()
+        self.setStyleSheet(f"background:{c['BG']}; border-radius:18px;")
         screen = QApplication.primaryScreen().geometry()
         self.move((screen.width()-self.width())//2, (screen.height()-self.height())//2)
         root = QVBoxLayout(self); root.setContentsMargins(0,0,0,0)
         card = QFrame(); card.setObjectName("splash_card")
-        card.setStyleSheet("""
-            QFrame#splash_card{background:#ffffff;border-radius:18px;border:1px solid #e4e4e7;}
-            QFrame#splash_card QLabel{border:none;background:transparent;color:#18181b;}
+        card.setStyleSheet(f"""
+            QFrame#splash_card{{background:{c['SURFACE']};border-radius:18px;border:1px solid {c['BORDER']};}}
+            QFrame#splash_card QLabel{{border:none;background:transparent;}}
         """)
         cl = QVBoxLayout(card); cl.setContentsMargins(40,40,40,36); cl.setSpacing(14); cl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.logo_lbl = QLabel(); self.logo_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -222,13 +304,13 @@ class SplashScreen(QWidget):
             self.logo_lbl.setText("🍁 UHN KITE"); self.logo_lbl.setStyleSheet("font-size:32px;font-weight:bold;color:#e11d48;")
         cl.addWidget(self.logo_lbl)
         self.status_lbl = QLabel("Initialising database…"); self.status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status_lbl.setStyleSheet("color:#52525b;font-size:13px;font-weight:500;background:transparent;")
+        self.status_lbl.setStyleSheet(f"color:{c['TEXT2']};font-size:13px;font-weight:500;background:transparent;")
         cl.addWidget(self.status_lbl)
         self.bar = QProgressBar(); self.bar.setRange(0,100); self.bar.setValue(0); self.bar.setTextVisible(False); self.bar.setFixedHeight(6)
-        self.bar.setStyleSheet("QProgressBar{background:#e4e4e7;border:none;border-radius:3px;}QProgressBar::chunk{background:#2563eb;border-radius:3px;}")
+        self.bar.setStyleSheet(f"QProgressBar{{background:{c['SURFACE2']};border:none;border-radius:3px;}}QProgressBar::chunk{{background:{c['ACCENT']};border-radius:3px;}}")
         cl.addWidget(self.bar)
         ver = QLabel("Footwear Evaluation Database · KITE Research Institute"); ver.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        ver.setStyleSheet("color:#a1a1aa;font-size:10px;background:transparent;"); cl.addWidget(ver)
+        ver.setStyleSheet(f"color:{c['DIM']};font-size:10px;background:transparent;"); cl.addWidget(ver)
         root.addWidget(card)
         self._val=0; self._timer=QTimer(self); self._timer.timeout.connect(self._tick); self._timer.start(20)
 
@@ -345,49 +427,66 @@ class SyncWorker(QThread):
         added=updated=errors=0
         con=sqlite3.connect(DB_PATH)
 
-        # 1. Read Excel
+        # 1. Read Excel (dynamic: mapped by header row, not column position)
         excel_rows={}
         if os.path.exists(EXCEL_PATH):
             try:
                 import openpyxl
-                wb=openpyxl.load_workbook(EXCEL_PATH,data_only=True); ws=wb.active
-                HEADERS=[
-                    None,"Safety?","MAA for wet ice","MAA for cold ice","Final MAA score",
-                    "Listed on the RMT website (Y/N)","RMT/Yes/Pass","Prototype","Client",
-                    "Brand","Name","Model#","Type","technology","Size","Size weighed",
-                    "Weight (g)","Upper","Date Manufactured","Date Received","Date returned",
-                    "Date to complete test","Date Tested","Report date","Date sent to client",
-                    "Report #",None,"Test surface","Protocol","weight of left shoe",
-                    "weight of right shoe","test id","Hardness R1","Hardness R2","Hardness R3",
-                    "HardnessL1","HardnessL2","HardnessL3","Variation Within Spot <5",
-                    "Hardness R1.1","Hardness R2.1","Hardness R3.1","Hardness L1","Hardness L2",
-                    "Hardness L3","Variation Within Spot <5.1","Hardness measurement date",
-                    "SATRA test date","Website","Size Range","Features/Upper","Insulation",
-                    "Height","Sole (Inner/Midsole/Outersole)","Standard","To test",
-                    "Repeated test production","Repeated test prototype","MAA",
-                    "Received 1","Received 2","Received 3","Received 4"
-                ]
-                for row in ws.iter_rows(min_row=2,values_only=True):
-                    raw_id=row[0]
-                    if not raw_id: continue
-                    idapt_id=str(raw_id).strip().upper()
+                wb=openpyxl.load_workbook(EXCEL_PATH,data_only=True,read_only=True); ws=wb.active
+                rows=ws.iter_rows(values_only=True)
+                raw_headers=next(rows,None)
+                if not raw_headers: raise ValueError("Excel sheet has no header row")
+                HEADERS=_clean_headers(raw_headers)
+
+                id_idx=_find_col(HEADERS,ID_ALIASES,contains=["idapt"])
+                if id_idx is None: id_idx=0
+                brand_idx=_find_col(HEADERS,BRAND_ALIASES,contains=["brand"])
+                model_idx=_find_col(HEADERS,MODEL_ALIASES,contains=["model"])
+                size_idx=_find_col(HEADERS,SIZE_ALIASES,contains=["size"])
+                maa_idx=_find_col(HEADERS,MAA_ALIASES,contains=["maa"])
+
+                new_layout=[h for h in HEADERS if h]
+                old_layout=_config.get("excel_headers")
+                if old_layout and old_layout!=new_layout:
+                    self.progress.emit("⚠️ Excel layout has changed since last sync; re-mapped columns by header name")
+                _config["excel_headers"]=new_layout
+                _config["excel_core_headers"]=[HEADERS[i] for i in (id_idx,brand_idx,model_idx,size_idx) if i is not None and HEADERS[i]]
+                core_map={}
+                for kind,idx in (("id",id_idx),("brand",brand_idx),("model",model_idx),("size",size_idx),("maa",maa_idx)):
+                    if idx is not None and HEADERS[idx]: core_map[_base_header(HEADERS[idx])]=kind
+                _config["excel_core_map"]=core_map
+                save_config(_config)
+
+                def _hn(i): return HEADERS[i] if i is not None and HEADERS[i] else "?"
+                self.progress.emit(f"🧭 Columns → id:{_hn(id_idx)} · brand:{_hn(brand_idx)} · model:{_hn(model_idx)} · size:{_hn(size_idx)} · maa:{_hn(maa_idx)}")
+                missing=[lbl for lbl,idx in (("Brand",brand_idx),("Model",model_idx),("Size",size_idx),("MAA",maa_idx)) if idx is None]
+                if missing:
+                    self.progress.emit(f"⚠️ No column found for: {', '.join(missing)}. Left blank (rename the Excel column or add an alias at the top of Database.py)")
+
+                def cell(row,i):
+                    if i is None or i>=len(row) or row[i] is None: return ""
+                    return str(row[i]).strip()
+
+                for row in rows:
+                    if not row: continue
+                    idapt_id=cell(row,id_idx).upper()
+                    if not idapt_id: continue
                     if not idapt_id.startswith("IDAPT"): continue
                     lab={}
                     for i,h in enumerate(HEADERS):
                         if h and i<len(row) and row[i] not in (None,""):
+                            if i==id_idx or _base_header(h) in ID_SET: continue
                             lab[h]=str(row[i]).strip()
-                    brand=str(row[9] or "").strip()
-                    model=str(row[10] or "").strip()
-                    size=str(row[14] or "").strip()
-                    maa_raw=row[58]
+                    maa_raw=row[maa_idx] if maa_idx is not None and maa_idx<len(row) else None
                     try: maa=float(maa_raw) if maa_raw not in (None,"") else None
-                    except: maa=None
-                    excel_rows[idapt_id]={"brand":brand,"model":model,"size":size,"maa":maa,"lab":lab}
+                    except (TypeError,ValueError): maa=None
+                    excel_rows[idapt_id]={"brand":cell(row,brand_idx),"model":cell(row,model_idx),"size":cell(row,size_idx),"maa":maa,"lab":lab}
+                wb.close()
                 self.progress.emit(f"📊 Read {len(excel_rows)} rows from Excel")
             except Exception as e:
                 self.progress.emit(f"⚠️ Excel error: {e}"); errors+=1
         else:
-            self.progress.emit("⚠️ Excel not found — skipping")
+            self.progress.emit("⚠️ Excel not found, skipping")
 
         # 2. Scan Images and Reports
         folder_data={}
@@ -404,7 +503,7 @@ class SyncWorker(QThread):
                 folder_data[idapt_id]={"imgs":imgs,"pdfs":pdfs,"best":best}
             self.progress.emit(f"📁 Found {len(folder_data)} iDAPT folders")
         else:
-            self.progress.emit("⚠️ Image/Report folder not found — skipping")
+            self.progress.emit("⚠️ Image/Report folder not found, skipping")
 
         # 3. Merge
         existing={r[0]:r[1] for r in con.execute("SELECT idapt_id,id FROM shoes WHERE idapt_id IS NOT NULL")}
@@ -416,6 +515,8 @@ class SyncWorker(QThread):
             brand=ex.get("brand",""); model=ex.get("model",""); size=ex.get("size","")
             maa=ex.get("maa"); lab_json=json.dumps(ex.get("lab",{})) if ex.get("lab") else ""
             imgs=fld.get("imgs",[]); pdfs=fld.get("pdfs",[]); best_img=fld.get("best","")
+            name=f"{brand} {model}".strip()
+            desc=f" ({name})" if name else ""
 
             if idapt_id in existing:
                 con.execute("""UPDATE shoes SET brand=?,model=?,size=?,maa_mean=?,
@@ -423,13 +524,13 @@ class SyncWorker(QThread):
                     WHERE idapt_id=?""",
                     (brand,model,size,maa,lab_json,best_img,json.dumps(imgs),
                      pdfs[0] if pdfs else "",json.dumps(pdfs),idapt_id))
-                updated+=1; self.progress.emit(f"↻  Updated {idapt_id} — {brand} {model}".strip())
+                updated+=1; self.progress.emit(f"↻  Updated {idapt_id}{desc}")
             else:
                 con.execute("""INSERT INTO shoes(idapt_id,brand,model,size,maa_mean,
                     lab_data,image_path,all_images,report_path,all_reports)VALUES(?,?,?,?,?,?,?,?,?,?)""",
                     (idapt_id,brand,model,size,maa,lab_json,best_img,json.dumps(imgs),
                      pdfs[0] if pdfs else "",json.dumps(pdfs)))
-                added+=1; self.progress.emit(f"✚  Added {idapt_id} — {brand} {model}".strip())
+                added+=1; self.progress.emit(f"✚  Added {idapt_id}{desc}")
 
         con.commit(); con.close()
         self.done.emit(added,updated,errors)
@@ -439,27 +540,29 @@ class SyncDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
         self.setWindowTitle("Sync"); self.setMinimumSize(500,400); self.resize(500,460)
-        self.setStyleSheet("""
-            QDialog { background:#ffffff; color:#18181b; }
-            QLabel  { background:transparent; color:#18181b; }
-            QTextEdit { background:#f8f8f8; color:#18181b; border:1px solid #e4e4e7; border-radius:6px; font-size:12px; }
-            QProgressBar { background:#e4e4e7; border:none; border-radius:3px; height:6px; }
-            QProgressBar::chunk { background:#2563eb; border-radius:3px; }
-            QPushButton { background:#2563eb; color:#ffffff; border-radius:8px; padding:8px 24px; font-weight:600; border:none; font-size:13px; }
-            QPushButton:hover { background:#1d4ed8; }
-            QPushButton:disabled { background:#e4e4e7; color:#a1a1aa; }
+        c=get_c()
+        hover='#2563eb' if CURRENT_MODE=="dark" else '#1d4ed8'
+        self.setStyleSheet(f"""
+            QDialog {{ background:{c['BG']}; color:{c['TEXT']}; }}
+            QLabel  {{ background:transparent; color:{c['TEXT']}; }}
+            QTextEdit {{ background:{c['SURFACE2']}; color:{c['TEXT']}; border:1px solid {c['BORDER']}; border-radius:6px; font-size:12px; }}
+            QProgressBar {{ background:{c['SURFACE2']}; border:none; border-radius:3px; height:6px; }}
+            QProgressBar::chunk {{ background:{c['ACCENT']}; border-radius:3px; }}
+            QPushButton {{ background:{c['ACCENT']}; color:#ffffff; border-radius:8px; padding:8px 24px; font-weight:600; border:none; font-size:13px; }}
+            QPushButton:hover {{ background:{hover}; }}
+            QPushButton:disabled {{ background:{c['SURFACE2']}; color:{c['DIM']}; }}
         """)
         lay = QVBoxLayout(self); lay.setContentsMargins(20,20,20,20); lay.setSpacing(12)
 
         self.title_lbl = QLabel("Syncing from Excel + Photos folder…")
-        self.title_lbl.setStyleSheet("font-size:15px; font-weight:700; color:#18181b;")
+        self.title_lbl.setStyleSheet(f"font-size:15px; font-weight:700; color:{c['TEXT']};")
         lay.addWidget(self.title_lbl)
 
         self.bar = QProgressBar(); self.bar.setRange(0,0); self.bar.setFixedHeight(6); lay.addWidget(self.bar)
 
         self.log = QTextEdit(); self.log.setReadOnly(True); lay.addWidget(self.log)
 
-        self.ok_btn = QPushButton("OK — Close"); self.ok_btn.setEnabled(False)
+        self.ok_btn = QPushButton("Close"); self.ok_btn.setEnabled(False)
         self.ok_btn.clicked.connect(self.accept)
         lay.addWidget(self.ok_btn, alignment=Qt.AlignmentFlag.AlignRight)
 
@@ -474,7 +577,7 @@ class SyncDialog(QDialog):
 
     def _on_done(self, added, updated, errors):
         self.bar.setRange(0,100); self.bar.setValue(100)
-        summary = f"✅  Done — {added} new shoes added, {updated} updated"
+        summary = f"✅  Done: {added} new shoes added, {updated} updated"
         if errors: summary += f", {errors} errors"
         self.title_lbl.setText(summary)
         self.log.append(f"\n{summary}")
@@ -568,7 +671,8 @@ class HomeWidget(QWidget):
         btn.setObjectName("home_btn"); btn.clicked.connect(enter_callback); layout.addWidget(btn,alignment=Qt.AlignmentFlag.AlignCenter)
 
     def paintEvent(self,event):
-        painter=QPainter(self); painter.fillRect(self.rect(),QColor("#ffffff")); painter.end()
+        c=get_c()
+        painter=QPainter(self); painter.fillRect(self.rect(),QColor(c['BG'])); painter.end()
 
 # ── FlowLayout ────────────────────────────────────────────────────────────────
 class FlowLayout(QLayout):
@@ -1002,7 +1106,7 @@ class SidebarDetail(QWidget):
             val_lbl=QLabel(sc_txt); val_lbl.setStyleSheet(f"color:{score_color(sc)};font-size:28px;font-weight:700;font-family:'Courier New';")
             val_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             meta=QWidget(); mm=QVBoxLayout(meta); mm.setContentsMargins(12,0,0,4); mm.setSpacing(2)
-            mm.addWidget(mk("MAA Mean",c['TEXT2'],11,bold=True))
+            mm.addWidget(mk("MAA",c['TEXT2'],11,bold=True))
             if sd_txt: mm.addWidget(mk(sd_txt,c['DIM'],10))
             ml.addWidget(val_lbl); ml.addWidget(meta); ml.addStretch(); self.inner_l.addWidget(mw); divider()
 
@@ -1043,7 +1147,7 @@ class SidebarDetail(QWidget):
 # ── Form Dialog ───────────────────────────────────────────────────────────────
 class ShoeForm(QDialog):
     CORE_FIELDS=[("iDAPT ID","idapt_id"),("Brand","brand"),("Model","model"),("Year","year"),("Size","size"),
-                 ("Sole Type","sole_type"),("Tread Pattern","tread"),("MAA Mean (°)","maa_mean"),("MAA Std Dev","maa_sd")]
+                 ("Sole Type","sole_type"),("Tread Pattern","tread"),("MAA (°)","maa_mean"),("MAA Std Dev","maa_sd")]
 
     def __init__(self, parent, shoe=None, on_save=None):
         super().__init__(parent)
@@ -1093,7 +1197,7 @@ class ShoeForm(QDialog):
         lab_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight|Qt.AlignmentFlag.AlignVCenter)
         try: existing_lab_data=json.loads(self.shoe.get("lab_data") or "{}")
         except: existing_lab_data={}
-        for field in LAB_FIELDS:
+        for field in lab_form_fields(existing_lab_data):
             e=QLineEdit(); v=existing_lab_data.get(field,"")
             if v not in (None,"nan",""): e.setText(str(v))
             lab_form.addRow(flbl(field),e); self._lab_entries[field]=e
@@ -1112,7 +1216,14 @@ class ShoeForm(QDialog):
     def _save(self):
         data={k: e.text().strip() for k,e in self._core_entries.items()}
         data["notes"]=self._notes.toPlainText().strip()
-        lab_dict={k: e.text().strip() for k,e in self._lab_entries.items() if e.text().strip()}
+        # start from the stored lab dict so keys not rendered in the form
+        # (e.g. excel columns mapped to core fields) are never dropped
+        try: lab_dict=dict(json.loads(self.shoe.get("lab_data") or "{}"))
+        except: lab_dict={}
+        for k,e in self._lab_entries.items():
+            v=e.text().strip()
+            if v: lab_dict[k]=v
+            else: lab_dict.pop(k,None)
         data["lab_data"]=json.dumps(lab_dict) if lab_dict else ""
         if self._img_path and os.path.isfile(self._img_path):
             dst=os.path.join(IMG_DIR,os.path.basename(self._img_path))
@@ -1417,7 +1528,7 @@ class CompareColumn(QFrame):
             maa_lbl.setStyleSheet(f"color:{score_color(sc)};font-size:24px;font-weight:700;font-family:'Courier New';background:transparent;")
             maa_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             maa_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            sub_txt = "MAA Mean"
+            sub_txt = "MAA"
             if sd not in (None,""):
                 try: sub_txt += f"  ·  σ={float(sd):.2f}°"
                 except: pass
@@ -1793,44 +1904,26 @@ class ShoeDatabase(QMainWindow):
             ws = wb.active
             ws.title = "Selected Shoes"
             
-            headers = [
-                "idapt#", "Safety?", "MAA for wet ice", "MAA for cold ice", "Final MAA score",
-                "Listed on the RMT website (Y/N)", "RMT/Yes/Pass", "Prototype", "Client",
-                "Brand", "Name", "Model#", "Type", "technology", "Size", "Size weighed",
-                "Weight (g)", "Upper", "Shoe", "Date Manufactured", "Date Received", "Date returned",
-                "Date to complete test", "Date Tested", "Report date", "Date sent to client",
-                "Report #", "idapt#2", "Test surface", "Protocol", "weight of left shoe",
-                "weight of right shoe", "test id", "Hardness R1", "Hardness R2", "Hardness R3",
-                "HardnessL1", "HardnessL2", "HardnessL3", "Variation Within Spot <5",
-                "Hardness R1.1", "Hardness R2.1", "Hardness R3.1", "Hardness L1", "Hardness L2",
-                "Hardness L3", "Variation Within Spot <5.1", "Hardness measurement date",
-                "SATRA test date", "Website", "Size Range", "Features/Upper", "Insulation",
-                "Height", "Sole (Inner/Midsole/Outersole)", "Standard", "To test",
-                "Repeated test production", "Repeated test prototype", "MAA",
-                "Received 1", "Received 2", "Received 3", "Received 4"
-            ]
+            headers=_config.get("excel_headers")
+            if not headers:
+                headers=["idapt#","Brand","Name","Size"]+LAB_FIELDS
             ws.append(headers)
-            
+
             selected_shoes = [s for s in self._all_shoes if s["id"] in self._multi_selected_shoes]
-            
+
             for shoe in selected_shoes:
                 try: lab = json.loads(shoe.get("lab_data") or "{}")
                 except: lab = {}
-                
+
                 row = []
                 for h in headers:
-                    if h == "idapt#" or h == "idapt#2":
-                        row.append(shoe.get("idapt_id", ""))
-                    elif h == "Brand":
-                        row.append(shoe.get("brand", ""))
-                    elif h == "Name":
-                        row.append(shoe.get("model", ""))
-                    elif h == "Size":
-                        row.append(shoe.get("size", ""))
-                    elif h == "MAA":
-                        row.append(shoe.get("maa_mean", ""))
-                    else:
-                        row.append(lab.get(h, ""))
+                    kind=_core_kind(h) or _config.get("excel_core_map",{}).get(_base_header(h))
+                    if kind=="id": row.append(shoe.get("idapt_id", ""))
+                    elif kind=="brand": row.append(shoe.get("brand", ""))
+                    elif kind=="model": row.append(shoe.get("model", ""))
+                    elif kind=="size": row.append(shoe.get("size", ""))
+                    elif kind=="maa": row.append(shoe.get("maa_mean", ""))
+                    else: row.append(lab.get(h, ""))
                 ws.append(row)
                 
             wb.save(path)
