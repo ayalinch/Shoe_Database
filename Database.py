@@ -1903,18 +1903,24 @@ class ShoeDatabase(QMainWindow):
             wb = openpyxl.Workbook()
             ws = wb.active
             ws.title = "Selected Shoes"
-            
-            headers=_config.get("excel_headers")
-            if not headers:
-                headers=["idapt#","Brand","Name","Size"]+LAB_FIELDS
-            ws.append(headers)
+
+            headers=list(_config.get("excel_headers") or (["idapt#","Brand","Name","Size"]+LAB_FIELDS))
 
             selected_shoes = [s for s in self._all_shoes if s["id"] in self._multi_selected_shoes]
 
+            # keep any lab fields that exist on the selected records but are no
+            # longer part of the master-list layout (custom/legacy fields) as
+            # trailing columns, so the export never silently drops data
+            labs=[]; covered=set(headers); extras=set()
             for shoe in selected_shoes:
                 try: lab = json.loads(shoe.get("lab_data") or "{}")
                 except: lab = {}
+                labs.append(lab)
+                extras.update(k for k in lab if k and k not in covered)
+            headers.extend(sorted(extras))
+            ws.append(headers)
 
+            for shoe, lab in zip(selected_shoes, labs):
                 row = []
                 for h in headers:
                     kind=_core_kind(h) or _config.get("excel_core_map",{}).get(_base_header(h))
